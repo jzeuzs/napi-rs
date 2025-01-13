@@ -1,7 +1,7 @@
-import { execSync } from 'child_process'
-import fs from 'fs'
-import path from 'path'
-import { fileURLToPath } from 'url'
+import { execSync } from 'node:child_process'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { kebabCase, startCase } from 'lodash-es'
 
@@ -67,8 +67,11 @@ function generateOptionsDef(command: CommandSchema) {
 
 function getOptionDescriptor(opt: OptionSchema) {
   let desc = `--${opt.long ?? kebabCase(opt.name)}`
+  if (opt.alias) {
+    desc += `,${opt.alias.map((alias) => `--${alias}`).join(',')}`
+  }
   if (opt.short) {
-    desc += `,-${opt.short}`
+    desc += `,${opt.short.map((short) => `-${short}`).join(',')}`
   }
 
   return desc
@@ -85,9 +88,16 @@ function generateCommandDef(command: CommandSchema) {
   const prepare: string[] = []
   const cmdLines: string[] = []
 
+  let paths = `[['${commandPath}']]`
+
+  if (command.alias) {
+    command.alias.unshift(commandPath)
+    paths = `[${command.alias.map((alias) => `['${alias}']`).join(', ')}]`
+  }
+
   cmdLines.push(`
 export abstract class Base${PascalCase(command.name)}Command extends Command {
-  static paths = [['${commandPath}']]
+  static paths = ${paths}
 
   static usage = Command.Usage({
     description: '${command.description}',

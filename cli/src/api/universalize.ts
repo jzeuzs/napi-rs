@@ -1,5 +1,5 @@
-import { spawnSync } from 'child_process'
-import { join, resolve } from 'path'
+import { spawnSync } from 'node:child_process'
+import { join, resolve } from 'node:path'
 
 import {
   applyDefaultUniversalizeOptions,
@@ -27,7 +27,10 @@ export async function universalizeBinaries(userOptions: UniversalizeOptions) {
 
   const packageJsonPath = join(options.cwd, options.packageJsonPath)
 
-  const config = await readNapiConfig(packageJsonPath)
+  const config = await readNapiConfig(
+    packageJsonPath,
+    options.configPath ? resolve(options.cwd, options.configPath) : undefined,
+  )
 
   const target = config.targets.find(
     (t) => t.platform === process.platform && t.arch === 'universal',
@@ -39,8 +42,12 @@ export async function universalizeBinaries(userOptions: UniversalizeOptions) {
     )
   }
 
-  const srcFiles = UniArchsByPlatform[process.platform]?.map(
-    (arch) => `${config.binaryName}.${process.platform}-${arch}.node`,
+  const srcFiles = UniArchsByPlatform[process.platform]?.map((arch) =>
+    resolve(
+      options.cwd,
+      options.outputDir,
+      `${config.binaryName}.${process.platform}-${arch}.node`,
+    ),
   )
 
   if (!srcFiles || !universalizers[process.platform]) {
@@ -52,9 +59,7 @@ export async function universalizeBinaries(userOptions: UniversalizeOptions) {
   debug(`Looking up source binaries to combine: `)
   debug('  %O', srcFiles)
 
-  const srcFileLookup = await Promise.all(
-    srcFiles.map((f) => fileExists(resolve(options.cwd, options.outputDir, f))),
-  )
+  const srcFileLookup = await Promise.all(srcFiles.map((f) => fileExists(f)))
 
   const notFoundFiles = srcFiles.filter((_, i) => !srcFileLookup[i])
 

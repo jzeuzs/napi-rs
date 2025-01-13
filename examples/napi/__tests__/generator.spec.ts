@@ -1,6 +1,6 @@
 import test from 'ava'
 
-import { Fib, Fib2, Fib3 } from '..'
+import { Fib, Fib2, Fib3 } from '../index.cjs'
 
 for (const [index, factory] of [
   () => new Fib(),

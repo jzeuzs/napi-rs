@@ -1,7 +1,7 @@
-import path from 'path'
+import path from 'node:path'
 
+import { input, select, checkbox, confirm } from '@inquirer/prompts'
 import { Option } from 'clipanion'
-import inquirer from 'inquirer'
 
 import { newProject } from '../api/new.js'
 import { BaseNewCommand } from '../def/new.js'
@@ -16,7 +16,7 @@ import { napiEngineRequirement } from '../utils/version.js'
 const debug = debugFactory('new')
 
 export class NewCommand extends BaseNewCommand {
-  interactive = Option.Boolean('--interactive,-i', false, {
+  interactive = Option.Boolean('--interactive,-i', true, {
     description:
       'Ask project basic information interactively without just using the default.',
   })
@@ -37,9 +37,13 @@ export class NewCommand extends BaseNewCommand {
     const cmdOptions = super.getOptions()
 
     if (this.interactive) {
+      const targetPath: string = cmdOptions.path
+        ? cmdOptions.path
+        : await inquirerProjectPath()
+      cmdOptions.path = targetPath
       return {
         ...cmdOptions,
-        name: await this.fetchName(path.parse(cmdOptions.path).base),
+        name: await this.fetchName(path.parse(targetPath).base),
         minNodeApiVersion: await this.fetchNapiVersion(),
         targets: await this.fetchTargets(),
         license: await this.fetchLicense(),
@@ -54,43 +58,31 @@ export class NewCommand extends BaseNewCommand {
   private async fetchName(defaultName: string): Promise<string> {
     return (
       this.$$name ??
-      (await inquirer
-        .prompt({
-          type: 'input',
-          name: 'name',
-          message: 'Package name (the name field in your package.json file)',
-          default: defaultName,
-        })
-        .then(({ name }) => name))
+      input({
+        message: 'Package name (the name field in your package.json file)',
+        default: defaultName,
+      })
     )
   }
 
   private async fetchLicense(): Promise<string> {
-    return inquirer
-      .prompt({
-        type: 'input',
-        name: 'license',
-        message: 'License for open-sourced project',
-        default: this.license,
-      })
-      .then(({ license }) => license)
+    return input({
+      message: 'License for open-sourced project',
+      default: this.license,
+    })
   }
 
   private async fetchNapiVersion(): Promise<number> {
-    return inquirer
-      .prompt({
-        type: 'list',
-        name: 'minNodeApiVersion',
-        message: 'Minimum node-api version (with node version requirement)',
-        loop: false,
-        choices: new Array(8).fill(0).map((_, i) => ({
-          name: `napi${i + 1} (${napiEngineRequirement(i + 1)})`,
-          value: i + 1,
-        })),
-        // choice index
-        default: this.minNodeApiVersion - 1,
-      })
-      .then(({ minNodeApiVersion }) => minNodeApiVersion)
+    return select({
+      message: 'Minimum node-api version (with node version requirement)',
+      loop: false,
+      choices: Array.from({ length: 8 }, (_, i) => ({
+        name: `napi${i + 1} (${napiEngineRequirement(i + 1)})`,
+        value: i + 1,
+      })),
+      // choice index
+      default: this.minNodeApiVersion - 1,
+    })
   }
 
   private async fetchTargets(): Promise<TargetTriple[]> {
@@ -98,22 +90,22 @@ export class NewCommand extends BaseNewCommand {
       return AVAILABLE_TARGETS.concat()
     }
 
-    const { targets } = await inquirer.prompt({
-      name: 'targets',
-      type: 'checkbox',
+    const targets = await checkbox({
       loop: false,
       message: 'Choose target(s) your crate will be compiled to',
-      default: this.enableDefaultTargets ? DEFAULT_TARGETS : [],
-      choices: AVAILABLE_TARGETS,
+      choices: AVAILABLE_TARGETS.map((target) => ({
+        name: target,
+        value: target,
+        // @ts-expect-error
+        checked: DEFAULT_TARGETS.includes(target),
+      })),
     })
 
     return targets
   }
 
   private async fetchTypeDef(): Promise<boolean> {
-    const { enableTypeDef } = await inquirer.prompt({
-      name: 'enableTypeDef',
-      type: 'confirm',
+    const enableTypeDef = await confirm({
       message: 'Enable type definition auto-generation',
       default: this.enableTypeDef,
     })
@@ -122,13 +114,22 @@ export class NewCommand extends BaseNewCommand {
   }
 
   private async fetchGithubActions(): Promise<boolean> {
-    const { enableGithubActions } = await inquirer.prompt({
-      name: 'enableGithubActions',
-      type: 'confirm',
+    const enableGithubActions = await confirm({
       message: 'Enable Github Actions CI',
       default: this.enableGithubActions,
     })
 
     return enableGithubActions
   }
+}
+
+async function inquirerProjectPath(): Promise<string> {
+  return input({
+    message: 'Target path to create the project, relative to cwd.',
+  }).then((path) => {
+    if (!path) {
+      return inquirerProjectPath()
+    }
+    return path
+  })
 }

@@ -1,10 +1,7 @@
 use proc_macro2::{Ident, Literal, Span, TokenStream};
 use quote::ToTokens;
 
-use crate::{
-  codegen::{get_register_ident, js_mod_to_token_stream},
-  BindgenResult, NapiEnum, TryToTokens,
-};
+use crate::{codegen::js_mod_to_token_stream, BindgenResult, NapiEnum, TryToTokens};
 
 impl TryToTokens for NapiEnum {
   fn try_to_tokens(&self, tokens: &mut TokenStream) -> BindgenResult<()> {
@@ -36,6 +33,101 @@ impl NapiEnum {
       to_napi_branches.push(quote! { #name::#v_name => #val });
     });
 
+    let validate_type = if self.is_string_enum {
+      quote! { napi::bindgen_prelude::ValueType::String }
+    } else {
+      quote! { napi::bindgen_prelude::ValueType::Number }
+    };
+
+    let from_napi_value = if self.variants.is_empty() {
+      quote! {
+        impl napi::bindgen_prelude::FromNapiValue for #name {
+          unsafe fn from_napi_value(
+            env: napi::bindgen_prelude::sys::napi_env,
+            napi_val: napi::bindgen_prelude::sys::napi_value
+          ) -> napi::bindgen_prelude::Result<Self> {
+            Err(napi::bindgen_prelude::error!(
+              napi::bindgen_prelude::Status::InvalidArg,
+              "enum `{}` has no variants",
+              #name_str
+            ))
+          }
+        }
+      }
+    } else {
+      let from_napi_value = if self.is_string_enum {
+        quote! {
+          let val: String = napi::bindgen_prelude::FromNapiValue::from_napi_value(env, napi_val)
+        }
+      } else {
+        quote! {
+          let val = napi::bindgen_prelude::FromNapiValue::from_napi_value(env, napi_val)
+        }
+      };
+      let match_val = if self.is_string_enum {
+        quote! { val.as_str() }
+      } else {
+        quote! { val }
+      };
+      quote! {
+        impl napi::bindgen_prelude::FromNapiValue for #name {
+          unsafe fn from_napi_value(
+            env: napi::bindgen_prelude::sys::napi_env,
+            napi_val: napi::bindgen_prelude::sys::napi_value
+          ) -> napi::bindgen_prelude::Result<Self> {
+            #from_napi_value.map_err(|e| {
+              napi::bindgen_prelude::error!(
+                e.status,
+                "Failed to convert napi value into enum `{}`. {}",
+                #name_str,
+                e,
+              )
+            })?;
+
+            match #match_val {
+              #(#from_napi_branches,)*
+              _ => {
+                Err(napi::bindgen_prelude::error!(
+                  napi::bindgen_prelude::Status::InvalidArg,
+                  "value `{:?}` does not match any variant of enum `{}`",
+                  val,
+                  #name_str
+                ))
+              }
+            }
+          }
+        }
+      }
+    };
+
+    let to_napi_value = if self.variants.is_empty() {
+      quote! {
+        impl napi::bindgen_prelude::ToNapiValue for #name {
+          unsafe fn to_napi_value(
+            env: napi::bindgen_prelude::sys::napi_env,
+            val: Self
+          ) -> napi::bindgen_prelude::Result<napi::bindgen_prelude::sys::napi_value> {
+            napi::bindgen_prelude::ToNapiValue::to_napi_value(env, ())
+          }
+        }
+      }
+    } else {
+      quote! {
+        impl napi::bindgen_prelude::ToNapiValue for #name {
+          unsafe fn to_napi_value(
+            env: napi::bindgen_prelude::sys::napi_env,
+            val: Self
+          ) -> napi::bindgen_prelude::Result<napi::bindgen_prelude::sys::napi_value> {
+            let val = match val {
+              #(#to_napi_branches,)*
+            };
+
+            napi::bindgen_prelude::ToNapiValue::to_napi_value(env, val)
+          }
+        }
+      }
+    };
+
     quote! {
       impl napi::bindgen_prelude::TypeName for #name {
         fn type_name() -> &'static str {
@@ -52,58 +144,21 @@ impl NapiEnum {
           env: napi::bindgen_prelude::sys::napi_env,
           napi_val: napi::bindgen_prelude::sys::napi_value
         ) -> napi::bindgen_prelude::Result<napi::sys::napi_value> {
-          napi::bindgen_prelude::assert_type_of!(env, napi_val, napi::bindgen_prelude::ValueType::Number)?;
+          napi::bindgen_prelude::assert_type_of!(env, napi_val, #validate_type)?;
           Ok(std::ptr::null_mut())
         }
       }
 
-      impl napi::bindgen_prelude::FromNapiValue for #name {
-        unsafe fn from_napi_value(
-          env: napi::bindgen_prelude::sys::napi_env,
-          napi_val: napi::bindgen_prelude::sys::napi_value
-        ) -> napi::bindgen_prelude::Result<Self> {
-          let val = FromNapiValue::from_napi_value(env, napi_val).map_err(|e| {
-            napi::bindgen_prelude::error!(
-              e.status,
-              "Failed to convert napi value into enum `{}`. {}",
-              #name_str,
-              e,
-            )
-          })?;
+      #from_napi_value
 
-          match val {
-            #(#from_napi_branches,)*
-            _ => {
-              Err(napi::bindgen_prelude::error!(
-                napi::bindgen_prelude::Status::InvalidArg,
-                "value `{:?}` does not match any variant of enum `{}`",
-                val,
-                #name_str
-              ))
-            }
-          }
-        }
-      }
-
-      impl napi::bindgen_prelude::ToNapiValue for #name {
-        unsafe fn to_napi_value(
-          env: napi::bindgen_prelude::sys::napi_env,
-          val: Self
-        ) -> napi::bindgen_prelude::Result<napi::bindgen_prelude::sys::napi_value> {
-          let val = match val {
-            #(#to_napi_branches,)*
-          };
-
-          ToNapiValue::to_napi_value(env, val)
-        }
-      }
+      #to_napi_value
     }
   }
 
   fn gen_module_register(&self) -> TokenStream {
     let name_str = self.name.to_string();
     let js_name_lit = Literal::string(&format!("{}\0", &self.js_name));
-    let register_name = get_register_ident(&name_str);
+    let register_name = &self.register_name;
 
     let mut define_properties = vec![];
 
@@ -118,7 +173,7 @@ impl NapiEnum {
             napi::bindgen_prelude::sys::napi_set_named_property(
               env,
               obj_ptr, name.as_ptr(),
-              ToNapiValue::to_napi_value(env, #val_lit)?
+              napi::bindgen_prelude::ToNapiValue::to_napi_value(env, #val_lit)?
             ),
             "Failed to defined enum `{}`",
             #js_name_lit
@@ -133,10 +188,6 @@ impl NapiEnum {
     );
 
     let js_mod_ident = js_mod_to_token_stream(self.js_mod.as_ref());
-
-    crate::codegen::REGISTER_IDENTS.with(|c| {
-      c.borrow_mut().push(register_name.to_string());
-    });
 
     quote! {
       #[allow(non_snake_case)]
@@ -158,14 +209,14 @@ impl NapiEnum {
       }
       #[allow(non_snake_case)]
       #[allow(clippy::all)]
-      #[cfg(all(not(test), not(feature = "noop"), not(target_arch = "wasm32")))]
+      #[cfg(all(not(test), not(target_family = "wasm")))]
       #[napi::bindgen_prelude::ctor]
       fn #register_name() {
         napi::bindgen_prelude::register_module_export(#js_mod_ident, #js_name_lit, #callback_name);
       }
       #[allow(non_snake_case)]
       #[allow(clippy::all)]
-      #[cfg(all(not(test), not(feature = "noop"), target_arch = "wasm32"))]
+      #[cfg(all(not(test), target_family = "wasm"))]
       #[no_mangle]
       extern "C" fn #register_name() {
         napi::bindgen_prelude::register_module_export(#js_mod_ident, #js_name_lit, #callback_name);

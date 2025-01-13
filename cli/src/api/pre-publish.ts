@@ -1,6 +1,6 @@
-import { execSync } from 'child_process'
-import { existsSync, statSync } from 'fs'
-import { join, relative, resolve } from 'path'
+import { execSync } from 'node:child_process'
+import { existsSync, statSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 
 import { Octokit } from '@octokit/rest'
 
@@ -31,10 +31,13 @@ export async function prePublish(userOptions: PrePublishOptions) {
 
   const options = applyDefaultPrePublishOptions(userOptions)
 
-  const packageJsonPath = relative(options.cwd, options.packageJsonPath)
+  const packageJsonPath = resolve(options.cwd, options.packageJsonPath)
 
   const { packageJson, targets, packageName, binaryName, npmClient } =
-    await readNapiConfig(packageJsonPath)
+    await readNapiConfig(
+      packageJsonPath,
+      options.configPath ? resolve(options.cwd, options.configPath) : undefined,
+    )
 
   async function createGhRelease(packageName: string, version: string) {
     if (!options.ghRelease) {
@@ -150,7 +153,9 @@ export async function prePublish(userOptions: PrePublishOptions) {
       options.npmDir,
       `${target.platformArchABI}`,
     )
-    const filename = `${binaryName}.${target.platformArchABI}.node`
+    const ext =
+      target.platform === 'wasi' || target.platform === 'wasm' ? 'wasm' : 'node'
+    const filename = `${binaryName}.${target.platformArchABI}.${ext}`
     const dstPath = join(pkgDir, filename)
 
     if (!options.dryRun) {
@@ -187,7 +192,8 @@ export async function prePublish(userOptions: PrePublishOptions) {
               'content-length': dstFileStats.size,
               'content-type': 'application/octet-stream',
             },
-            data: await readFileAsync(dstPath, { encoding: 'utf-8' }),
+            // @ts-expect-error octokit types are wrong
+            data: await readFileAsync(dstPath),
           })
           debug.info(`GitHub release created`)
           debug.info(`Download URL: %s`, assetInfo.data.browser_download_url)

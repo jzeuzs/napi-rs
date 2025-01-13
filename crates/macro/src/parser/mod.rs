@@ -1,28 +1,42 @@
 #[macro_use]
 pub mod attrs;
 
-use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::str::Chars;
+use std::sync::{atomic::AtomicUsize, Mutex, OnceLock};
 
-use attrs::{BindgenAttr, BindgenAttrs};
+use attrs::BindgenAttrs;
 
 use convert_case::{Case, Casing};
 use napi_derive_backend::{
-  BindgenResult, CallbackArg, Diagnostic, FnKind, FnSelf, Napi, NapiConst, NapiEnum, NapiEnumValue,
-  NapiEnumVariant, NapiFn, NapiFnArg, NapiFnArgKind, NapiImpl, NapiItem, NapiStruct,
-  NapiStructField, NapiStructKind,
+  rm_raw_prefix, BindgenResult, CallbackArg, Diagnostic, FnKind, FnSelf, Napi, NapiClass,
+  NapiConst, NapiEnum, NapiEnumValue, NapiEnumVariant, NapiFn, NapiFnArg, NapiFnArgKind, NapiImpl,
+  NapiItem, NapiObject, NapiStruct, NapiStructField, NapiStructKind, NapiStructuredEnum,
+  NapiStructuredEnumVariant, NapiTransparent, NapiType,
 };
-use proc_macro2::{Ident, Span, TokenStream, TokenTree};
+use proc_macro2::{Ident, Span, TokenStream};
 use quote::ToTokens;
 use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream, Result as SynResult};
-use syn::{Attribute, Meta, NestedMeta, PatType, PathSegment, Signature, Type, Visibility};
+use syn::spanned::Spanned;
+use syn::{
+  AngleBracketedGenericArguments, Attribute, ExprLit, GenericArgument, Meta, PatType, Path,
+  PathArguments, PathSegment, Signature, Type, Visibility,
+};
 
 use crate::parser::attrs::{check_recorded_struct_for_impl, record_struct};
 
-thread_local! {
-  static GENERATOR_STRUCT: RefCell<HashMap<String, bool>> = Default::default();
+static GENERATOR_STRUCT: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+
+static REGISTER_INDEX: AtomicUsize = AtomicUsize::new(0);
+
+fn get_register_ident(name: &str) -> Ident {
+  let new_name = format!(
+    "__napi_register__{}_{}",
+    rm_raw_prefix(name),
+    REGISTER_INDEX.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+  );
+  Ident::new(&new_name, Span::call_site())
 }
 
 struct AnyIdent(Ident);
@@ -36,138 +50,12 @@ impl Parse for AnyIdent {
   }
 }
 
-impl Parse for BindgenAttrs {
-  fn parse(input: ParseStream) -> SynResult<Self> {
-    let mut attrs = BindgenAttrs::default();
-    if input.is_empty() {
-      return Ok(attrs);
-    }
-
-    let opts = syn::punctuated::Punctuated::<_, syn::token::Comma>::parse_terminated(input)?;
-    attrs.attrs = opts.into_iter().map(|c| (Cell::new(false), c)).collect();
-    Ok(attrs)
-  }
-}
-
-impl Parse for BindgenAttr {
-  fn parse(input: ParseStream) -> SynResult<Self> {
-    let original = input.fork();
-    let attr: AnyIdent = input.parse()?;
-    let attr = attr.0;
-    let attr_span = attr.span();
-    let attr_string = attr.to_string();
-    let raw_attr_string = format!("r#{}", attr_string);
-
-    macro_rules! parsers {
-      ($(($name:ident, $($contents:tt)*),)*) => {
-        $(
-          if attr_string == stringify!($name) || raw_attr_string == stringify!($name) {
-            parsers!(
-              @parser
-              $($contents)*
-            );
-          }
-        )*
-      };
-
-      (@parser $variant:ident(Span)) => ({
-        return Ok(BindgenAttr::$variant(attr_span));
-      });
-
-      (@parser $variant:ident(Span, Ident)) => ({
-        input.parse::<Token![=]>()?;
-        let ident = input.parse::<AnyIdent>()?.0;
-        return Ok(BindgenAttr::$variant(attr_span, ident))
-      });
-
-      (@parser $variant:ident(Span, Option<Ident>)) => ({
-        if input.parse::<Token![=]>().is_ok() {
-          let ident = input.parse::<AnyIdent>()?.0;
-          return Ok(BindgenAttr::$variant(attr_span, Some(ident)))
-        } else {
-          return Ok(BindgenAttr::$variant(attr_span, None));
-        }
-      });
-
-        (@parser $variant:ident(Span, syn::Path)) => ({
-            input.parse::<Token![=]>()?;
-            return Ok(BindgenAttr::$variant(attr_span, input.parse()?));
-        });
-
-        (@parser $variant:ident(Span, syn::Expr)) => ({
-            input.parse::<Token![=]>()?;
-            return Ok(BindgenAttr::$variant(attr_span, input.parse()?));
-        });
-
-        (@parser $variant:ident(Span, String, Span)) => ({
-          input.parse::<Token![=]>()?;
-          let (val, span) = match input.parse::<syn::LitStr>() {
-            Ok(str) => (str.value(), str.span()),
-            Err(_) => {
-              let ident = input.parse::<AnyIdent>()?.0;
-              (ident.to_string(), ident.span())
-            }
-          };
-          return Ok(BindgenAttr::$variant(attr_span, val, span))
-        });
-
-        (@parser $variant:ident(Span, Option<bool>)) => ({
-          if let Ok(_) = input.parse::<Token![=]>() {
-            let (val, _) = match input.parse::<syn::LitBool>() {
-              Ok(str) => (str.value(), str.span()),
-              Err(_) => {
-                let ident = input.parse::<AnyIdent>()?.0;
-                (true, ident.span())
-              }
-            };
-            return Ok::<BindgenAttr, syn::Error>(BindgenAttr::$variant(attr_span, Some(val)))
-          } else {
-            return Ok(BindgenAttr::$variant(attr_span, Some(true)))
-          }
-        });
-
-        (@parser $variant:ident(Span, Vec<String>, Vec<Span>)) => ({
-          input.parse::<Token![=]>()?;
-          let (vals, spans) = match input.parse::<syn::ExprArray>() {
-            Ok(exprs) => {
-              let mut vals = vec![];
-              let mut spans = vec![];
-
-              for expr in exprs.elems.iter() {
-                if let syn::Expr::Lit(syn::ExprLit {
-                  lit: syn::Lit::Str(ref str),
-                  ..
-                }) = expr {
-                  vals.push(str.value());
-                  spans.push(str.span());
-                } else {
-                  return Err(syn::Error::new(expr.span(), "expected string literals"));
-                }
-              }
-
-              (vals, spans)
-            },
-            Err(_) => {
-              let ident = input.parse::<AnyIdent>()?.0;
-              (vec![ident.to_string()], vec![ident.span()])
-            }
-          };
-          return Ok(BindgenAttr::$variant(attr_span, vals, spans))
-        });
-      }
-
-    attrgen!(parsers);
-
-    Err(original.error("unknown attribute"))
-  }
-}
-
 pub trait ConvertToAST {
-  fn convert_to_ast(&mut self, opts: BindgenAttrs) -> BindgenResult<Napi>;
+  fn convert_to_ast(&mut self, opts: &BindgenAttrs) -> BindgenResult<Napi>;
 }
 
 pub trait ParseNapi {
-  fn parse_napi(&mut self, tokens: &mut TokenStream, opts: BindgenAttrs) -> BindgenResult<Napi>;
+  fn parse_napi(&mut self, tokens: &mut TokenStream, opts: &BindgenAttrs) -> BindgenResult<Napi>;
 }
 
 /// This function does a few things:
@@ -185,59 +73,165 @@ fn find_ts_arg_type_and_remove_attribute(
   p: &mut PatType,
   ts_args_type: Option<&(&str, Span)>,
 ) -> BindgenResult<Option<String>> {
+  let mut ts_type_attr: Option<(usize, String)> = None;
   for (idx, attr) in p.attrs.iter().enumerate() {
-    if let Ok(Meta::List(meta_list)) = attr.parse_meta() {
-      if meta_list.path.get_ident() != Some(&format_ident!("napi")) {
-        // If this attribute is not for `napi` ignore it.
-        continue;
-      }
-
+    if attr.path().is_ident("napi") {
       if let Some((ts_args_type, _)) = ts_args_type {
         bail_span!(
-          meta_list,
+          attr,
           "Found a 'ts_args_type'=\"{}\" override. Cannot use 'ts_arg_type' at the same time since they are mutually exclusive.",
           ts_args_type
         );
       }
 
-      let nested = meta_list.nested.first();
+      match &attr.meta {
+        syn::Meta::Path(_) | syn::Meta::NameValue(_) => {
+          bail_span!(
+            attr,
+            "Expects an assignment #[napi(ts_arg_type = \"MyType\")]"
+          )
+        }
+        syn::Meta::List(list) => {
+          let mut found = false;
+          list
+            .parse_args_with(|tokens: &syn::parse::ParseBuffer<'_>| {
+              // tokens:
+              // #[napi(xxx, xxx=xxx)]
+              //        ^^^^^^^^^^^^
+              let list = tokens.parse_terminated(Meta::parse, Token![,])?;
 
-      let nm = if let Some(NestedMeta::Meta(Meta::NameValue(nm))) = nested {
-        nm
-      } else {
-        bail_span!(meta_list.nested, "Expected Name Value");
-      };
+              for meta in list {
+                if meta.path().is_ident("ts_arg_type") {
+                  match meta {
+                    Meta::Path(_) | Meta::List(_) => {
+                      return Err(syn::Error::new(
+                        meta.path().span(),
+                        "Expects an assignment (ts_arg_type = \"MyType\")",
+                      ))
+                    }
+                    Meta::NameValue(name_value) => match name_value.value {
+                      syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(str),
+                        ..
+                      }) => {
+                        let value = str.value();
+                        found = true;
+                        ts_type_attr = Some((idx, value));
+                      }
+                      _ => {
+                        return Err(syn::Error::new(
+                          name_value.value.span(),
+                          "Expects a string literal",
+                        ))
+                      }
+                    },
+                  }
+                }
+              }
 
-      if Some(&format_ident!("ts_arg_type")) != nm.path.get_ident() {
-        bail_span!(nm.path, "Did not find 'ts_arg_type'");
-      }
+              Ok(())
+            })
+            .map_err(Diagnostic::from)?;
 
-      if let syn::Lit::Str(lit) = &nm.lit {
-        p.attrs.remove(idx);
-        return Ok(Some(lit.value()));
-      } else {
-        bail_span!(nm.lit, "Expected a string literal");
+          if !found {
+            bail_span!(attr, "Expects a 'ts_arg_type'");
+          }
+        }
       }
     }
   }
 
-  Ok(None)
+  if let Some((idx, value)) = ts_type_attr {
+    p.attrs.remove(idx);
+    Ok(Some(value))
+  } else {
+    Ok(None)
+  }
 }
 
-fn get_ty(mut ty: &syn::Type) -> &syn::Type {
+fn find_enum_value_and_remove_attribute(v: &mut syn::Variant) -> BindgenResult<Option<String>> {
+  let mut name_attr: Option<(usize, String)> = None;
+  for (idx, attr) in v.attrs.iter().enumerate() {
+    if attr.path().is_ident("napi") {
+      match &attr.meta {
+        syn::Meta::Path(_) | syn::Meta::NameValue(_) => {
+          bail_span!(
+            attr,
+            "Expects an assignment #[napi(value = \"enum-variant-value\")]"
+          )
+        }
+        syn::Meta::List(list) => {
+          let mut found = false;
+          list
+            .parse_args_with(|tokens: &syn::parse::ParseBuffer<'_>| {
+              // tokens:
+              // #[napi(xxx, xxx=xxx)]
+              //        ^^^^^^^^^^^^
+              let list = tokens.parse_terminated(Meta::parse, Token![,])?;
+
+              for meta in list {
+                if meta.path().is_ident("value") {
+                  match meta {
+                    Meta::Path(_) | Meta::List(_) => {
+                      return Err(syn::Error::new(
+                        meta.path().span(),
+                        "Expects an assignment (value = \"enum-variant-value\")",
+                      ))
+                    }
+                    Meta::NameValue(name_value) => match name_value.value {
+                      syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(str),
+                        ..
+                      }) => {
+                        let value = str.value();
+                        found = true;
+                        name_attr = Some((idx, value));
+                      }
+                      _ => {
+                        return Err(syn::Error::new(
+                          name_value.value.span(),
+                          "Expects a string literal",
+                        ))
+                      }
+                    },
+                  }
+                }
+              }
+
+              Ok(())
+            })
+            .map_err(Diagnostic::from)?;
+
+          if !found {
+            bail_span!(attr, "Expects a 'value'");
+          }
+        }
+      }
+    }
+  }
+
+  if let Some((idx, value)) = name_attr {
+    v.attrs.remove(idx);
+    Ok(Some(value))
+  } else {
+    Ok(None)
+  }
+}
+
+fn get_ty(mut ty: &mut syn::Type) -> &mut syn::Type {
   while let syn::Type::Group(g) = ty {
-    ty = &g.elem;
+    ty = &mut g.elem;
   }
 
   ty
 }
 
-fn replace_self(ty: syn::Type, self_ty: Option<&Ident>) -> syn::Type {
+fn replace_self(mut ty: syn::Type, self_ty: Option<&Ident>) -> syn::Type {
   let self_ty = match self_ty {
     Some(i) => i,
     None => return ty,
   };
-  let path = match get_ty(&ty) {
+  let path = match get_ty(&mut ty) {
     syn::Type::Path(syn::TypePath { qself: None, path }) => path.clone(),
     other => return other.clone(),
   };
@@ -253,16 +247,24 @@ fn replace_self(ty: syn::Type, self_ty: Option<&Ident>) -> syn::Type {
 }
 
 /// Extracts the last ident from the path
-fn extract_path_ident(path: &syn::Path) -> BindgenResult<Ident> {
-  for segment in path.segments.iter() {
-    match segment.arguments {
+fn extract_path_ident(path: &mut syn::Path) -> BindgenResult<(Ident, bool)> {
+  let mut has_lifetime = false;
+  for segment in path.segments.iter_mut() {
+    match &segment.arguments {
       syn::PathArguments::None => {}
+      syn::PathArguments::AngleBracketed(generic) => {
+        if let Some(GenericArgument::Lifetime(_)) = generic.args.first() {
+          has_lifetime = true;
+        } else {
+          bail_span!(path, "Only 1 lifetime is supported for now");
+        }
+      }
       _ => bail_span!(path, "paths with type parameters are not supported yet"),
     }
   }
 
   match path.segments.last() {
-    Some(value) => Ok(value.ident.clone()),
+    Some(value) => Ok((value.ident.clone(), has_lifetime)),
     None => {
       bail_span!(path, "empty idents are not supported");
     }
@@ -349,17 +351,25 @@ fn extract_doc_comments(attrs: &[syn::Attribute]) -> Vec<String> {
     .filter_map(|a| {
       // if the path segments include an ident of "doc" we know this
       // this is a doc comment
-      if a.path.segments.iter().any(|s| s.ident == "doc") {
-        Some(
-          // We want to filter out any Puncts so just grab the Literals
-          a.tokens.clone().into_iter().filter_map(|t| match t {
-            TokenTree::Literal(lit) => {
-              let quoted = lit.to_string();
-              Some(try_unescape(&quoted).unwrap_or(quoted))
-            }
-            _ => None,
-          }),
-        )
+      let name_value = a.meta.require_name_value();
+      if let Ok(name) = name_value {
+        if a.path().is_ident("doc") {
+          Some(
+            // We want to filter out any Puncts so just grab the Literals
+            match &name.value {
+              syn::Expr::Lit(ExprLit {
+                lit: syn::Lit::Str(str),
+                ..
+              }) => {
+                let quoted = str.token().to_string();
+                Some(try_unescape(&quoted).unwrap_or(quoted))
+              }
+              _ => None,
+            },
+          )
+        } else {
+          None
+        }
       } else {
         None
       }
@@ -484,6 +494,10 @@ fn extract_fn_closure_generics(
                   ));
                 }
               }
+              _ => errors.push(err_span! {
+                bound,
+                "unsupported bound in napi"
+              }),
             }
           }
         }
@@ -518,9 +532,14 @@ fn extract_fn_closure_generics(
                 ));
               }
             }
+            _ => errors.push(err_span! {
+              bound,
+              "unsupported bound in napi"
+            }),
           }
         }
       }
+      syn::GenericParam::Lifetime(_) => {}
       _ => {
         errors.push(err_span!(param, "unsupported napi generic param for fn"));
       }
@@ -611,15 +630,15 @@ fn napi_fn_from_decl(
     syn::ReturnType::Default => (None, false),
     syn::ReturnType::Type(_, ty) => {
       let result_ty = extract_result_ty(&ty)?;
-      if result_ty.is_some() {
-        (result_ty, true)
+      if let Some(result_ty) = result_ty {
+        (Some(replace_self(result_ty, parent)), true)
       } else {
         (Some(replace_self(*ty, parent)), false)
       }
     }
   };
 
-  Diagnostic::from_vec(errors).map(|_| {
+  Diagnostic::from_vec(errors).and_then(|_| {
     let js_name = if let Some(prop_name) = opts.getter() {
       opts.js_name().map_or_else(
         || {
@@ -659,27 +678,43 @@ fn napi_fn_from_decl(
 
     let namespace = opts.namespace().map(|(m, _)| m.to_owned());
     let parent_is_generator = if let Some(p) = parent {
-      GENERATOR_STRUCT.with(|inner| {
-        let inner = inner.borrow();
-        let key = namespace
-          .as_ref()
-          .map(|n| format!("{}::{}", n, p))
-          .unwrap_or_else(|| p.to_string());
-        *inner.get(&key).unwrap_or(&false)
-      })
+      let generator_struct = GENERATOR_STRUCT.get_or_init(|| Mutex::new(HashMap::new()));
+      let generator_struct = generator_struct
+        .lock()
+        .expect("Lock generator struct failed");
+
+      let key = namespace
+        .as_ref()
+        .map(|n| format!("{}::{}", n, p))
+        .unwrap_or_else(|| p.to_string());
+      *generator_struct.get(&key).unwrap_or(&false)
     } else {
       false
     };
 
-    NapiFn {
-      name: ident,
+    let kind = fn_kind(opts);
+
+    if !matches!(kind, FnKind::Normal) && parent.is_none() {
+      bail_span!(
+        sig.ident,
+        "Only fn in impl block can be marked as factory, constructor, getter or setter"
+      );
+    }
+
+    if matches!(kind, FnKind::Constructor) && asyncness.is_some() {
+      bail_span!(sig.ident, "Constructor don't support asynchronous function");
+    }
+
+    Ok(NapiFn {
+      name: ident.clone(),
       js_name,
       args,
       ret,
       is_ret_result,
       is_async: asyncness.is_some(),
+      within_async_runtime: opts.async_runtime().is_some(),
       vis,
-      kind: fn_kind(opts),
+      kind,
       fn_self,
       parent: parent.cloned(),
       comments: extract_doc_comments(&attrs),
@@ -687,6 +722,7 @@ fn napi_fn_from_decl(
       strict: opts.strict().is_some(),
       return_if_invalid: opts.return_if_invalid().is_some(),
       js_mod: opts.namespace().map(|(m, _)| m.to_owned()),
+      ts_type: opts.ts_type().map(|(m, _)| m.to_owned()),
       ts_generic_types: opts.ts_generic_types().map(|(m, _)| m.to_owned()),
       ts_args_type: opts.ts_args_type().map(|(m, _)| m.to_owned()),
       ts_return_type: opts.ts_return_type().map(|(m, _)| m.to_owned()),
@@ -697,18 +733,20 @@ fn napi_fn_from_decl(
       configurable: opts.configurable(),
       catch_unwind: opts.catch_unwind().is_some(),
       unsafe_: sig.unsafety.is_some(),
-    }
+      register_name: get_register_ident(ident.to_string().as_str()),
+    })
   })
 }
 
 impl ParseNapi for syn::Item {
-  fn parse_napi(&mut self, tokens: &mut TokenStream, opts: BindgenAttrs) -> BindgenResult<Napi> {
+  fn parse_napi(&mut self, tokens: &mut TokenStream, opts: &BindgenAttrs) -> BindgenResult<Napi> {
     match self {
       syn::Item::Fn(f) => f.parse_napi(tokens, opts),
       syn::Item::Struct(s) => s.parse_napi(tokens, opts),
       syn::Item::Impl(i) => i.parse_napi(tokens, opts),
       syn::Item::Enum(e) => e.parse_napi(tokens, opts),
       syn::Item::Const(c) => c.parse_napi(tokens, opts),
+      syn::Item::Type(c) => c.parse_napi(tokens, opts),
       _ => bail_span!(
         self,
         "#[napi] can only be applied to a function, struct, enum, const, mod or impl."
@@ -718,11 +756,13 @@ impl ParseNapi for syn::Item {
 }
 
 impl ParseNapi for syn::ItemFn {
-  fn parse_napi(&mut self, tokens: &mut TokenStream, opts: BindgenAttrs) -> BindgenResult<Napi> {
-    if opts.ts_type().is_some() {
+  fn parse_napi(&mut self, tokens: &mut TokenStream, opts: &BindgenAttrs) -> BindgenResult<Napi> {
+    if opts.ts_type().is_some()
+      && (opts.ts_args_type().is_some() || opts.ts_return_type().is_some())
+    {
       bail_span!(
         self,
-        "#[napi] can't be applied to a function with #[napi(ts_type)]"
+        "#[napi] with ts_type cannot be combined with ts_args_type, ts_return_type in function"
       );
     }
     if opts.return_if_invalid().is_some() && opts.strict().is_some() {
@@ -738,7 +778,7 @@ impl ParseNapi for syn::ItemFn {
   }
 }
 impl ParseNapi for syn::ItemStruct {
-  fn parse_napi(&mut self, tokens: &mut TokenStream, opts: BindgenAttrs) -> BindgenResult<Napi> {
+  fn parse_napi(&mut self, tokens: &mut TokenStream, opts: &BindgenAttrs) -> BindgenResult<Napi> {
     if opts.ts_args_type().is_some()
       || opts.ts_return_type().is_some()
       || opts.skip_typescript().is_some()
@@ -772,7 +812,7 @@ impl ParseNapi for syn::ItemStruct {
 }
 
 impl ParseNapi for syn::ItemImpl {
-  fn parse_napi(&mut self, tokens: &mut TokenStream, opts: BindgenAttrs) -> BindgenResult<Napi> {
+  fn parse_napi(&mut self, tokens: &mut TokenStream, opts: &BindgenAttrs) -> BindgenResult<Napi> {
     if opts.ts_args_type().is_some()
       || opts.ts_return_type().is_some()
       || opts.skip_typescript().is_some()
@@ -805,7 +845,7 @@ impl ParseNapi for syn::ItemImpl {
 }
 
 impl ParseNapi for syn::ItemEnum {
-  fn parse_napi(&mut self, tokens: &mut TokenStream, opts: BindgenAttrs) -> BindgenResult<Napi> {
+  fn parse_napi(&mut self, tokens: &mut TokenStream, opts: &BindgenAttrs) -> BindgenResult<Napi> {
     if opts.ts_args_type().is_some()
       || opts.ts_return_type().is_some()
       || opts.ts_type().is_some()
@@ -835,7 +875,7 @@ impl ParseNapi for syn::ItemEnum {
   }
 }
 impl ParseNapi for syn::ItemConst {
-  fn parse_napi(&mut self, tokens: &mut TokenStream, opts: BindgenAttrs) -> BindgenResult<Napi> {
+  fn parse_napi(&mut self, tokens: &mut TokenStream, opts: &BindgenAttrs) -> BindgenResult<Napi> {
     if opts.ts_args_type().is_some()
       || opts.ts_return_type().is_some()
       || opts.ts_type().is_some()
@@ -845,6 +885,35 @@ impl ParseNapi for syn::ItemConst {
         self,
         "#[napi] can't be applied to a const with #[napi(ts_args_type)], #[napi(ts_return_type)] or #[napi(ts_type)] or #[napi(custom_finalize)]"
       );
+    }
+    if opts.return_if_invalid().is_some() {
+      bail_span!(
+        self,
+        "#[napi(return_if_invalid)] can only be applied to a function or method."
+      );
+    }
+    if opts.catch_unwind().is_some() {
+      bail_span!(
+        self,
+        "#[napi(catch_unwind)] can only be applied to a function or method."
+      );
+    }
+    let napi = self.convert_to_ast(opts);
+    self.to_tokens(tokens);
+    napi
+  }
+}
+
+impl ParseNapi for syn::ItemType {
+  fn parse_napi(&mut self, tokens: &mut TokenStream, opts: &BindgenAttrs) -> BindgenResult<Napi> {
+    if opts.ts_args_type().is_some()
+      || opts.ts_return_type().is_some()
+      || opts.custom_finalize().is_some()
+    {
+      bail_span!(
+          self,
+          "#[napi] can't be applied to a type with #[napi(ts_args_type)], #[napi(ts_return_type)] or #[napi(custom_finalize)]"
+        );
     }
     if opts.return_if_invalid().is_some() {
       bail_span!(
@@ -887,10 +956,10 @@ fn fn_kind(opts: &BindgenAttrs) -> FnKind {
 }
 
 impl ConvertToAST for syn::ItemFn {
-  fn convert_to_ast(&mut self, opts: BindgenAttrs) -> BindgenResult<Napi> {
+  fn convert_to_ast(&mut self, opts: &BindgenAttrs) -> BindgenResult<Napi> {
     let func = napi_fn_from_decl(
       &mut self.sig,
-      &opts,
+      opts,
       self.attrs.clone(),
       self.vis.clone(),
       None,
@@ -902,115 +971,199 @@ impl ConvertToAST for syn::ItemFn {
   }
 }
 
+fn convert_fields(
+  fields: &mut syn::Fields,
+  check_vis: bool,
+) -> BindgenResult<(Vec<NapiStructField>, bool)> {
+  let mut napi_fields = vec![];
+  let is_tuple = matches!(fields, syn::Fields::Unnamed(_));
+  for (i, field) in fields.iter_mut().enumerate() {
+    if check_vis && !matches!(field.vis, syn::Visibility::Public(_)) {
+      continue;
+    }
+
+    let field_opts = BindgenAttrs::find(&mut field.attrs)?;
+
+    let (js_name, name) = match &field.ident {
+      Some(ident) => (
+        field_opts.js_name().map_or_else(
+          || ident.unraw().to_string().to_case(Case::Camel),
+          |(js_name, _)| js_name.to_owned(),
+        ),
+        syn::Member::Named(ident.clone()),
+      ),
+      None => (format!("field{}", i), syn::Member::Unnamed(i.into())),
+    };
+
+    let ignored = field_opts.skip().is_some();
+    let readonly = field_opts.readonly().is_some();
+    let writable = field_opts.writable();
+    let enumerable = field_opts.enumerable();
+    let configurable = field_opts.configurable();
+    let skip_typescript = field_opts.skip_typescript().is_some();
+    let ts_type = field_opts.ts_type().map(|e| e.0.to_string());
+
+    let mut ty = field.ty.clone();
+
+    let has_lifetime = if let Type::Path(syn::TypePath {
+      path: Path { segments, .. },
+      ..
+    }) = &mut ty
+    {
+      if let Some(PathSegment {
+        arguments: PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }),
+        ..
+      }) = segments.last_mut()
+      {
+        args.iter_mut().any(|arg| {
+          if let GenericArgument::Lifetime(lifetime) = arg {
+            *lifetime = syn::Lifetime::new("'static", Span::call_site());
+            true
+          } else {
+            false
+          }
+        })
+      } else {
+        false
+      }
+    } else {
+      false
+    };
+
+    napi_fields.push(NapiStructField {
+      name,
+      js_name,
+      ty,
+      getter: !ignored,
+      setter: !(ignored || readonly),
+      writable,
+      enumerable,
+      configurable,
+      comments: extract_doc_comments(&field.attrs),
+      skip_typescript,
+      ts_type,
+      has_lifetime,
+    })
+  }
+  Ok((napi_fields, is_tuple))
+}
+
 impl ConvertToAST for syn::ItemStruct {
-  fn convert_to_ast(&mut self, opts: BindgenAttrs) -> BindgenResult<Napi> {
+  fn convert_to_ast(&mut self, opts: &BindgenAttrs) -> BindgenResult<Napi> {
     let mut errors = vec![];
 
-    let vis = self.vis.clone();
     let struct_name = self.ident.clone();
     let js_name = opts.js_name().map_or_else(
       || self.ident.to_string().to_case(Case::Pascal),
       |(js_name, _)| js_name.to_owned(),
     );
-    let mut fields = vec![];
-    let mut is_tuple = false;
-    let struct_kind = if opts.constructor().is_some() {
-      NapiStructKind::Constructor
+
+    let use_nullable = opts.use_nullable();
+    let (fields, is_tuple) = convert_fields(&mut self.fields, true)?;
+
+    record_struct(&struct_name, js_name.clone(), opts);
+    let namespace = opts.namespace().map(|(m, _)| m.to_owned());
+    let implement_iterator = opts.iterator().is_some();
+    let generator_struct = GENERATOR_STRUCT.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut generator_struct = generator_struct
+      .lock()
+      .expect("Lock generator struct failed");
+    let key = namespace
+      .as_ref()
+      .map(|n| format!("{}::{}", n, struct_name))
+      .unwrap_or_else(|| struct_name.to_string());
+    generator_struct.insert(key, implement_iterator);
+    drop(generator_struct);
+
+    let transparent = opts
+      .transparent()
+      .is_some()
+      .then(|| -> Result<_, Diagnostic> {
+        if !is_tuple || self.fields.len() != 1 {
+          bail_span!(
+            self,
+            "#[napi(transparent)] can only be applied to a struct with a single field tuple",
+          )
+        }
+        let first_field = self.fields.iter().next().unwrap();
+        Ok(first_field.ty.clone())
+      })
+      .transpose()?;
+
+    let struct_kind = if let Some(transparent) = transparent {
+      NapiStructKind::Transparent(NapiTransparent {
+        ty: transparent,
+        object_from_js: opts.object_from_js(),
+        object_to_js: opts.object_to_js(),
+      })
     } else if opts.object().is_some() {
-      NapiStructKind::Object
+      NapiStructKind::Object(NapiObject {
+        fields,
+        object_from_js: opts.object_from_js(),
+        object_to_js: opts.object_to_js(),
+        is_tuple,
+      })
     } else {
-      NapiStructKind::None
+      NapiStructKind::Class(NapiClass {
+        fields,
+        ctor: opts.constructor().is_some(),
+        implement_iterator,
+        is_tuple,
+        use_custom_finalize: opts.custom_finalize().is_some(),
+      })
     };
 
-    for (i, field) in self.fields.iter_mut().enumerate() {
-      match field.vis {
-        syn::Visibility::Public(..) => {}
-        _ => {
-          if struct_kind != NapiStructKind::None {
+    match &struct_kind {
+      NapiStructKind::Transparent(_) => {}
+      NapiStructKind::Class(class) if !class.ctor => {}
+      _ => {
+        for field in self.fields.iter() {
+          if !matches!(field.vis, syn::Visibility::Public(_)) {
             errors.push(err_span!(
               field,
               "#[napi] requires all struct fields to be public to mark struct as constructor or object shape\nthis field is not public."
             ));
           }
-          continue;
         }
       }
+    };
 
-      let field_opts = BindgenAttrs::find(&mut field.attrs)?;
-
-      let (js_name, name) = match &field.ident {
-        Some(ident) => (
-          field_opts.js_name().map_or_else(
-            || ident.unraw().to_string().to_case(Case::Camel),
-            |(js_name, _)| js_name.to_owned(),
-          ),
-          syn::Member::Named(ident.clone()),
-        ),
-        None => {
-          is_tuple = true;
-          (format!("field{}", i), syn::Member::Unnamed(i.into()))
-        }
-      };
-
-      let ignored = field_opts.skip().is_some();
-      let readonly = field_opts.readonly().is_some();
-      let writable = field_opts.writable();
-      let enumerable = field_opts.enumerable();
-      let configurable = field_opts.configurable();
-      let skip_typescript = field_opts.skip_typescript().is_some();
-      let ts_type = field_opts.ts_type().map(|e| e.0.to_string());
-
-      fields.push(NapiStructField {
-        name,
-        js_name,
-        ty: field.ty.clone(),
-        getter: !ignored,
-        setter: !(ignored || readonly),
-        writable,
-        enumerable,
-        configurable,
-        comments: extract_doc_comments(&field.attrs),
-        skip_typescript,
-        ts_type,
-      })
+    if self.generics.lifetimes().size_hint().0 > 1 {
+      errors.push(err_span!(
+        self,
+        "struct with multiple generic parameters is not supported"
+      ));
     }
 
-    record_struct(&struct_name, js_name.clone(), &opts);
-    let namespace = opts.namespace().map(|(m, _)| m.to_owned());
-    let implement_iterator = opts.iterator().is_some();
-    GENERATOR_STRUCT.with(|inner| {
-      let mut inner = inner.borrow_mut();
-      let key = namespace
-        .as_ref()
-        .map(|n| format!("{}::{}", n, struct_name))
-        .unwrap_or_else(|| struct_name.to_string());
-      inner.insert(key, implement_iterator);
-    });
+    let lifetime = if let Some(lifetime) = self.generics.lifetimes().next() {
+      if !lifetime.bounds.is_empty() {
+        bail_span!(lifetime.bounds, "unsupported self type in #[napi] impl")
+      }
+      Some(lifetime.lifetime.to_string())
+    } else {
+      None
+    };
 
     Diagnostic::from_vec(errors).map(|()| Napi {
       item: NapiItem::Struct(NapiStruct {
         js_name,
-        name: struct_name,
-        vis,
-        fields,
-        is_tuple,
+        name: struct_name.clone(),
         kind: struct_kind,
-        object_from_js: opts.object_from_js(),
-        object_to_js: opts.object_to_js(),
         js_mod: namespace,
+        use_nullable,
+        register_name: get_register_ident(format!("{struct_name}_struct").as_str()),
         comments: extract_doc_comments(&self.attrs),
-        implement_iterator,
-        use_custom_finalize: opts.custom_finalize().is_some(),
+        has_lifetime: lifetime.is_some(),
       }),
     })
   }
 }
 
 impl ConvertToAST for syn::ItemImpl {
-  fn convert_to_ast(&mut self, impl_opts: BindgenAttrs) -> BindgenResult<Napi> {
-    let struct_name = match get_ty(&self.self_ty) {
+  fn convert_to_ast(&mut self, impl_opts: &BindgenAttrs) -> BindgenResult<Napi> {
+    let struct_name = match get_ty(&mut self.self_ty) {
       syn::Type::Path(syn::TypePath {
-        ref path,
+        ref mut path,
         qself: None,
       }) => path,
       _ => {
@@ -1018,7 +1171,7 @@ impl ConvertToAST for syn::ItemImpl {
       }
     };
 
-    let struct_name = extract_path_ident(struct_name)?;
+    let (struct_name, has_lifetime) = extract_path_ident(struct_name)?;
 
     let mut struct_js_name = struct_name.to_string().to_case(Case::UpperCamel);
     let mut items = vec![];
@@ -1028,14 +1181,12 @@ impl ConvertToAST for syn::ItemImpl {
     let mut iterator_return_type = None;
     for item in self.items.iter_mut() {
       if let Some(method) = match item {
-        syn::ImplItem::Method(m) => Some(m),
+        syn::ImplItem::Fn(m) => Some(m),
         syn::ImplItem::Type(m) => {
           if let Some((_, t, _)) = &self.trait_ {
             if let Some(PathSegment { ident, .. }) = t.segments.last() {
               if ident == "Task" && m.ident == "JsValue" {
-                if let Type::Path(_) = &m.ty {
-                  task_output_type = Some(m.ty.clone());
-                }
+                task_output_type = Some(m.ty.clone());
               } else if ident == "Generator" {
                 if let Type::Path(_) = &m.ty {
                   if m.ident == "Yield" {
@@ -1091,60 +1242,129 @@ impl ConvertToAST for syn::ItemImpl {
 
     Ok(Napi {
       item: NapiItem::Impl(NapiImpl {
-        name: struct_name,
+        name: struct_name.clone(),
         js_name: struct_js_name,
         items,
         task_output_type,
         iterator_yield_type,
         iterator_next_type,
         iterator_return_type,
+        has_lifetime,
         js_mod: namespace,
         comments: extract_doc_comments(&self.attrs),
+        register_name: get_register_ident(format!("{struct_name}_impl").as_str()),
       }),
     })
   }
 }
 
 impl ConvertToAST for syn::ItemEnum {
-  fn convert_to_ast(&mut self, opts: BindgenAttrs) -> BindgenResult<Napi> {
+  fn convert_to_ast(&mut self, opts: &BindgenAttrs) -> BindgenResult<Napi> {
     match self.vis {
       Visibility::Public(_) => {}
       _ => bail_span!(self, "only public enum allowed"),
     }
 
-    self.attrs.push(Attribute {
-      pound_token: Default::default(),
-      style: syn::AttrStyle::Outer,
-      bracket_token: Default::default(),
-      path: syn::parse_quote! { derive },
-      tokens: quote! { (Copy, Clone) },
-    });
-
     let js_name = opts
       .js_name()
       .map_or_else(|| self.ident.to_string(), |(s, _)| s.to_string());
+    let is_string_enum = opts.string_enum().is_some();
+
+    if self
+      .variants
+      .iter()
+      .any(|v| !matches!(v.fields, syn::Fields::Unit))
+    {
+      let discriminant = opts.discriminant().map_or("type", |(s, _)| s);
+      let mut errors = vec![];
+      let mut variants = vec![];
+      for variant in self.variants.iter_mut() {
+        let (fields, is_tuple) = convert_fields(&mut variant.fields, false)?;
+        for field in fields.iter() {
+          if field.js_name == discriminant {
+            errors.push(err_span!(
+              field.name,
+              r#"field's js_name("{}") and discriminator("{}") conflict"#,
+              field.js_name,
+              discriminant,
+            ));
+          }
+        }
+        variants.push(NapiStructuredEnumVariant {
+          name: variant.ident.clone(),
+          fields,
+          is_tuple,
+        });
+      }
+      let struct_name = self.ident.clone();
+      return Diagnostic::from_vec(errors).map(|()| Napi {
+        item: NapiItem::Struct(NapiStruct {
+          name: struct_name.clone(),
+          js_name,
+          comments: extract_doc_comments(&self.attrs),
+          js_mod: opts.namespace().map(|(m, _)| m.to_owned()),
+          use_nullable: opts.use_nullable(),
+          register_name: get_register_ident(format!("{struct_name}_struct").as_str()),
+          kind: NapiStructKind::StructuredEnum(NapiStructuredEnum {
+            variants,
+            discriminant: discriminant.to_owned(),
+            object_from_js: opts.object_from_js(),
+            object_to_js: opts.object_to_js(),
+          }),
+          has_lifetime: false,
+        }),
+      });
+    }
 
     let variants = match opts.string_enum() {
-      Some(_) => self
-        .variants
-        .iter()
-        .map(|v| {
-          if !matches!(v.fields, syn::Fields::Unit) {
-            bail_span!(v.fields, "Structured enum is not supported in #[napi]")
+      Some(case) => {
+        let case = case.map(|c| Ok::<Case, Diagnostic>(match c.0.as_str() {
+          "lowercase" => Case::Flat,
+          "UPPERCASE" => Case::UpperFlat,
+          "PascalCase" => Case::Pascal,
+          "camelCase" => Case::Camel,
+          "snake_case" => Case::Snake,
+          "SCREAMING_SNAKE_CASE" => Case::UpperSnake,
+          "kebab-case" => Case::Kebab,
+          "SCREAMING-KEBAB-CASE" => Case::UpperKebab,
+          _ => {
+            bail_span!(self, "Unknown string enum case. Possible values are \"lowercase\", \"UPPERCASE\", \"PascalCase\", \"camelCase\", \"snake_case\", \"SCREAMING_SNAKE_CASE\", \"kebab-case\", or \"SCREAMING-KEBAB-CASE\"")
           }
-          if matches!(&v.discriminant, Some((_, _))) {
-            bail_span!(
-              v.fields,
-              "Literal values are not supported with string enum in #[napi]"
-            )
-          }
-          Ok(NapiEnumVariant {
-            name: v.ident.clone(),
-            val: NapiEnumValue::String(v.ident.to_string()),
-            comments: extract_doc_comments(&v.attrs),
+        })).transpose()?;
+
+        self
+          .variants
+          .iter_mut()
+          .map(|v| {
+            if !matches!(v.fields, syn::Fields::Unit) {
+              bail_span!(
+                v.fields,
+                "Structured enum is not supported with string enum in #[napi]"
+              )
+            }
+            if matches!(&v.discriminant, Some((_, _))) {
+              bail_span!(
+                v.fields,
+                "Literal values are not supported with string enum in #[napi]"
+              )
+            }
+
+            let val = find_enum_value_and_remove_attribute(v)?.unwrap_or_else(|| {
+              let mut val = v.ident.to_string();
+              if let Some(case) = case {
+                val = val.to_case(case)
+              }
+              val
+            });
+
+            Ok(NapiEnumVariant {
+              name: v.ident.clone(),
+              val: NapiEnumValue::String(val),
+              comments: extract_doc_comments(&v.attrs),
+            })
           })
-        })
-        .collect::<BindgenResult<Vec<NapiEnumVariant>>>()?,
+          .collect::<BindgenResult<Vec<NapiEnumVariant>>>()?
+      }
       None => {
         let mut last_variant_val: i32 = -1;
 
@@ -1152,10 +1372,6 @@ impl ConvertToAST for syn::ItemEnum {
           .variants
           .iter()
           .map(|v| {
-            if !matches!(v.fields, syn::Fields::Unit) {
-              bail_span!(v.fields, "Structured enum is not supported in #[napi]")
-            }
-
             let val = match &v.discriminant {
               Some((_, expr)) => {
                 let mut symbol = 1;
@@ -1214,13 +1430,15 @@ impl ConvertToAST for syn::ItemEnum {
         js_mod: opts.namespace().map(|(m, _)| m.to_owned()),
         comments: extract_doc_comments(&self.attrs),
         skip_typescript: opts.skip_typescript().is_some(),
+        register_name: get_register_ident(self.ident.to_string().as_str()),
+        is_string_enum,
       }),
     })
   }
 }
 
 impl ConvertToAST for syn::ItemConst {
-  fn convert_to_ast(&mut self, opts: BindgenAttrs) -> BindgenResult<Napi> {
+  fn convert_to_ast(&mut self, opts: &BindgenAttrs) -> BindgenResult<Napi> {
     match self.vis {
       Visibility::Public(_) => Ok(Napi {
         item: NapiItem::Const(NapiConst {
@@ -1233,9 +1451,46 @@ impl ConvertToAST for syn::ItemConst {
           js_mod: opts.namespace().map(|(m, _)| m.to_owned()),
           comments: extract_doc_comments(&self.attrs),
           skip_typescript: opts.skip_typescript().is_some(),
+          register_name: get_register_ident(self.ident.to_string().as_str()),
         }),
       }),
       _ => bail_span!(self, "only public const allowed"),
+    }
+  }
+}
+
+impl ConvertToAST for syn::ItemType {
+  fn convert_to_ast(&mut self, opts: &BindgenAttrs) -> BindgenResult<Napi> {
+    let js_name = match opts.js_name() {
+      Some((name, _)) => name.to_string(),
+      _ => {
+        if !self.generics.params.is_empty() {
+          let types = self
+            .generics
+            .type_params()
+            .map(|param| param.ident.to_string())
+            .collect::<Vec<String>>()
+            .join(", ");
+          format!("{}<{}>", self.ident, types)
+        } else {
+          self.ident.to_string()
+        }
+      }
+    };
+
+    match self.vis {
+      Visibility::Public(_) => Ok(Napi {
+        item: NapiItem::Type(NapiType {
+          name: self.ident.clone(),
+          js_name,
+          value: *self.ty.clone(),
+          js_mod: opts.namespace().map(|(m, _)| m.to_owned()),
+          comments: extract_doc_comments(&self.attrs),
+          skip_typescript: opts.skip_typescript().is_some(),
+          register_name: get_register_ident(self.ident.to_string().as_str()),
+        }),
+      }),
+      _ => bail_span!(self, "only public type allowed"),
     }
   }
 }

@@ -1,9 +1,22 @@
+import { underline, yellow } from 'colorette'
 import { merge, omit } from 'lodash-es'
 
 import { fileExists, readFileAsync } from './misc.js'
 import { DEFAULT_TARGETS, parseTriple, Target } from './target.js'
 
-interface UserNapiConfig {
+export type ValueOfConstArray<T> = T[Exclude<keyof T, keyof Array<any>>]
+
+export const SupportedPackageManagers = ['yarn'] as const
+export const SupportedTestFrameworks = ['ava'] as const
+
+export type SupportedPackageManager = ValueOfConstArray<
+  typeof SupportedPackageManagers
+>
+export type SupportedTestFramework = ValueOfConstArray<
+  typeof SupportedTestFrameworks
+>
+
+export interface UserNapiConfig {
   /**
    * Name of the binary to be generated, default to `index`
    */
@@ -25,6 +38,47 @@ interface UserNapiConfig {
   npmClient?: string
 
   /**
+   * Whether generate const enum for typescript bindings
+   */
+  constEnum?: boolean
+
+  /**
+   * dts header prepend to the generated dts file
+   */
+  dtsHeader?: string
+
+  /**
+   * dts header file path to be prepended to the generated dts file
+   * if both dtsHeader and dtsHeaderFile are provided, dtsHeaderFile will be used
+   */
+  dtsHeaderFile?: string
+
+  /**
+   * wasm compilation options
+   */
+  wasm?: {
+    /**
+     * https://developer.mozilla.org/en-US/docs/WebAssembly/JavaScript_interface/Memory
+     * @default 4000 pages (256MiB)
+     */
+    initialMemory?: number
+    /**
+     * @default 65536 pages (4GiB)
+     */
+    maximumMemory?: number
+
+    /**
+     * Browser wasm binding configuration
+     */
+    browser: {
+      /**
+       * Whether to use fs module in browser
+       */
+      fs?: boolean
+    }
+  }
+
+  /**
    * @deprecated binaryName instead
    */
   name?: string
@@ -41,7 +95,7 @@ interface UserNapiConfig {
     /**
      * Whether enable default targets
      */
-    default: boolean
+    defaults: boolean
     /**
      * Additional targets to be compiled for
      */
@@ -71,22 +125,34 @@ export interface CommonPackageJsonFields {
   main?: string
   module?: string
   types?: string
+  browser?: string
   exports?: any
 
   dependencies?: Record<string, string>
   devDependencies?: Record<string, string>
+
+  ava?: {
+    timeout?: string
+  }
 }
 
 export type NapiConfig = Required<
   Pick<UserNapiConfig, 'binaryName' | 'packageName' | 'npmClient'>
-> & {
-  targets: Target[]
-  packageJson: CommonPackageJsonFields
-}
+> &
+  Pick<UserNapiConfig, 'wasm' | 'dtsHeader' | 'dtsHeaderFile' | 'constEnum'> & {
+    targets: Target[]
+    packageJson: CommonPackageJsonFields
+  }
 
-export async function readNapiConfig(path: string): Promise<NapiConfig> {
+export async function readNapiConfig(
+  path: string,
+  configPath?: string,
+): Promise<NapiConfig> {
+  if (configPath && !(await fileExists(configPath))) {
+    throw new Error(`NAPI-RS config not found at ${configPath}`)
+  }
   if (!(await fileExists(path))) {
-    throw new Error(`napi-rs config not found at ${path}`)
+    throw new Error(`package.json not found at ${path}`)
   }
   // May support multiple config sources later on.
   const content = await readFileAsync(path, 'utf8')
@@ -94,12 +160,34 @@ export async function readNapiConfig(path: string): Promise<NapiConfig> {
   try {
     pkgJson = JSON.parse(content) as CommonPackageJsonFields
   } catch (e) {
-    throw new Error('Failed to parse napi-rs config', {
+    throw new Error(`Failed to parse package.json at ${path}`, {
       cause: e,
     })
   }
 
+  let separatedConfig: UserNapiConfig | undefined
+  if (configPath) {
+    const configContent = await readFileAsync(configPath, 'utf8')
+    try {
+      separatedConfig = JSON.parse(configContent) as UserNapiConfig
+    } catch (e) {
+      throw new Error(`Failed to parse NAPI-RS config at ${configPath}`, {
+        cause: e,
+      })
+    }
+  }
+
   const userNapiConfig = pkgJson.napi ?? {}
+  if (pkgJson.napi && separatedConfig) {
+    const pkgJsonPath = underline(path)
+    const configPathUnderline = underline(configPath!)
+    console.warn(
+      yellow(
+        `Both napi field in ${pkgJsonPath} and [NAPI-RS config](${configPathUnderline}) file are found, the NAPI-RS config file will be used.`,
+      ),
+    )
+    Object.assign(userNapiConfig, separatedConfig)
+  }
   const napiConfig: NapiConfig = merge(
     {
       binaryName: 'index',
@@ -114,17 +202,31 @@ export async function readNapiConfig(path: string): Promise<NapiConfig> {
   let targets: string[] = userNapiConfig.targets ?? []
 
   // compatible with old config
-  if (userNapiConfig.package?.name) {
-    napiConfig.packageName = userNapiConfig.package.name
+  if (userNapiConfig?.name) {
+    console.warn(
+      yellow(
+        `[DEPRECATED] napi.name is deprecated, use napi.binaryName instead.`,
+      ),
+    )
+    napiConfig.binaryName = userNapiConfig.name
   }
 
   if (!targets.length) {
-    if (userNapiConfig.triples?.default) {
+    let deprecatedWarned = false
+    const warning = yellow(
+      `[DEPRECATED] napi.triples is deprecated, use napi.targets instead.`,
+    )
+    if (userNapiConfig.triples?.defaults) {
+      deprecatedWarned = true
+      console.warn(warning)
       targets = targets.concat(DEFAULT_TARGETS)
     }
 
     if (userNapiConfig.triples?.additional?.length) {
       targets = targets.concat(userNapiConfig.triples.additional)
+      if (!deprecatedWarned) {
+        console.warn(warning)
+      }
     }
   }
 

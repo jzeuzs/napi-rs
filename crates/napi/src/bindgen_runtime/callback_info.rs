@@ -4,18 +4,23 @@ use std::ptr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::{bindgen_prelude::*, check_status, sys, Result};
+use crate::{bindgen_prelude::*, check_status};
 
 thread_local! {
   #[doc(hidden)]
   /// Determined is `constructor` called from Class `factory`
-  pub static ___CALL_FROM_FACTORY: AtomicBool = AtomicBool::new(false);
+  pub static ___CALL_FROM_FACTORY: AtomicBool = const { AtomicBool::new(false) };
 }
 
+#[repr(transparent)]
+struct EmptyStructPlaceholder(u8);
+
+#[doc(hidden)]
 pub struct CallbackInfo<const N: usize> {
   env: sys::napi_env,
   pub this: sys::napi_value,
   pub args: [sys::napi_value; N],
+  this_reference: sys::napi_ref,
 }
 
 impl<const N: usize> CallbackInfo<N> {
@@ -24,6 +29,9 @@ impl<const N: usize> CallbackInfo<N> {
     env: sys::napi_env,
     callback_info: sys::napi_callback_info,
     required_argc: Option<usize>,
+    // for async class factory, the `this` will be used after the async call
+    // so we must create reference for it and use it after async resolved
+    use_after_async: bool,
   ) -> Result<Self> {
     let mut this = ptr::null_mut();
     let mut args = [ptr::null_mut(); N];
@@ -55,7 +63,21 @@ impl<const N: usize> CallbackInfo<N> {
       }
     }
 
-    Ok(Self { env, this, args })
+    let mut this_reference = ptr::null_mut();
+
+    if use_after_async {
+      check_status!(
+        unsafe { sys::napi_create_reference(env, this, 1, &mut this_reference) },
+        "Failed to create reference for `this` in async class factory"
+      )?;
+    }
+
+    Ok(Self {
+      env,
+      this,
+      args,
+      this_reference,
+    })
   }
 
   pub fn get_arg(&self, index: usize) -> sys::napi_value {
@@ -66,14 +88,19 @@ impl<const N: usize> CallbackInfo<N> {
     self.this
   }
 
-  fn _construct<T: ObjectFinalize + 'static>(
+  fn _construct<const IsEmptyStructHint: bool, T: ObjectFinalize + 'static>(
     &self,
     js_name: &str,
     obj: T,
   ) -> Result<(sys::napi_value, *mut T)> {
     let obj = Box::new(obj);
     let this = self.this();
-    let value_ref = Box::into_raw(obj);
+    let mut value_ref = Box::into_raw(obj);
+    // for empty struct like `#[napi] struct A;`, the `value_ref` will be `0x1`
+    // and it will be overwritten by the others instance of the same class
+    if IsEmptyStructHint || value_ref as usize == 0x1 {
+      value_ref = Box::into_raw(Box::new(EmptyStructPlaceholder(0))).cast();
+    }
     let mut object_ref = ptr::null_mut();
     let initial_finalize: Box<dyn FnOnce()> = Box::new(|| {});
     let finalize_callbacks_ptr = Rc::into_raw(Rc::new(Cell::new(Box::into_raw(initial_finalize))));
@@ -100,21 +127,26 @@ impl<const N: usize> CallbackInfo<N> {
     Ok((this, value_ref))
   }
 
-  pub fn construct<T: ObjectFinalize + 'static>(
+  pub fn construct<const IsEmptyStructHint: bool, T: ObjectFinalize + 'static>(
     &self,
     js_name: &str,
     obj: T,
   ) -> Result<sys::napi_value> {
-    self._construct(js_name, obj).map(|(v, _)| v)
+    self
+      ._construct::<IsEmptyStructHint, T>(js_name, obj)
+      .map(|(v, _)| v)
   }
 
-  pub fn construct_generator<T: Generator + ObjectFinalize + 'static>(
+  pub fn construct_generator<
+    const IsEmptyStructHint: bool,
+    T: Generator + ObjectFinalize + 'static,
+  >(
     &self,
     js_name: &str,
     obj: T,
   ) -> Result<sys::napi_value> {
-    let (instance, generator_ptr) = self._construct(js_name, obj)?;
-    crate::__private::create_iterator(self.env, instance, generator_ptr);
+    let (instance, generator_ptr) = self._construct::<IsEmptyStructHint, T>(js_name, obj)?;
+    unsafe { crate::__private::create_iterator(self.env, instance, generator_ptr) };
     Ok(instance)
   }
 
@@ -132,7 +164,7 @@ impl<const N: usize> CallbackInfo<N> {
     obj: T,
   ) -> Result<sys::napi_value> {
     let (instance, generator_ptr) = self._factory(js_name, obj)?;
-    crate::__private::create_iterator(self.env, instance, generator_ptr);
+    unsafe { crate::__private::create_iterator(self.env, instance, generator_ptr) };
     Ok(instance)
   }
 
@@ -141,8 +173,18 @@ impl<const N: usize> CallbackInfo<N> {
     js_name: &str,
     obj: T,
   ) -> Result<(sys::napi_value, *mut T)> {
-    let this = self.this();
+    let mut this = self.this();
     let mut instance = ptr::null_mut();
+    if !self.this_reference.is_null() {
+      check_status!(
+        unsafe { sys::napi_get_reference_value(self.env, self.this_reference, &mut this) },
+        "Failed to get reference value for `this` in async class factory"
+      )?;
+      check_status!(
+        unsafe { sys::napi_delete_reference(self.env, self.this_reference) },
+        "Failed to delete reference for `this` in async class factory"
+      )?;
+    }
     ___CALL_FROM_FACTORY.with(|s| s.store(true, Ordering::Relaxed));
     let status =
       unsafe { sys::napi_new_instance(self.env, this, 0, ptr::null_mut(), &mut instance) };
@@ -154,17 +196,24 @@ impl<const N: usize> CallbackInfo<N> {
       unsafe { sys::napi_throw(self.env, exception) };
       return Ok((ptr::null_mut(), ptr::null_mut()));
     }
+    check_status!(status, "Failed to create instance of class `{}`", js_name)?;
     let obj = Box::new(obj);
     let initial_finalize: Box<dyn FnOnce()> = Box::new(|| {});
     let finalize_callbacks_ptr = Rc::into_raw(Rc::new(Cell::new(Box::into_raw(initial_finalize))));
     let mut object_ref = ptr::null_mut();
-    let value_ref = Box::into_raw(obj);
+    let mut value_ref = Box::into_raw(obj);
+
+    // for empty struct like `#[napi] struct A;`, the `value_ref` will be `0x1`
+    // and it will be overwritten by the others instance of the same class
+    if value_ref as usize == 0x1 {
+      value_ref = Box::into_raw(Box::new(EmptyStructPlaceholder(0))).cast();
+    }
     check_status!(
       unsafe {
         sys::napi_wrap(
           self.env,
           instance,
-          value_ref as *mut c_void,
+          value_ref.cast(),
           Some(raw_finalize_unchecked::<T>),
           ptr::null_mut(),
           &mut object_ref,

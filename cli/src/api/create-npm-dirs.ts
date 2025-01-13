@@ -1,4 +1,6 @@
-import { join, resolve } from 'path'
+import { join, resolve } from 'node:path'
+
+import { parse } from 'semver'
 
 import {
   applyDefaultCreateNpmDirsOptions,
@@ -12,6 +14,8 @@ import {
   writeFileAsync as rawWriteFileAsync,
   Target,
 } from '../utils/index.js'
+
+import type { PackageMeta } from './templates/package.json.js'
 
 const debug = debugFactory('create-npm-dirs')
 
@@ -43,20 +47,25 @@ export async function createNpmDirs(userOptions: CreateNpmDirsOptions) {
   const packageJsonPath = resolve(options.cwd, options.packageJsonPath)
   const npmPath = resolve(options.cwd, options.npmDir)
 
-  debug(`Read content from [${packageJsonPath}]`)
+  debug(`Read content from [${options.configPath ?? packageJsonPath}]`)
 
   const { targets, binaryName, packageName, packageJson } =
-    await readNapiConfig(packageJsonPath)
+    await readNapiConfig(
+      packageJsonPath,
+      options.configPath ? resolve(options.cwd, options.configPath) : undefined,
+    )
 
   for (const target of targets) {
     const targetDir = join(npmPath, `${target.platformArchABI}`)
     await mkdirAsync(targetDir)
 
-    const binaryFileName = `${binaryName}.${target.platformArchABI}.node`
+    const binaryFileName =
+      target.arch === 'wasm32'
+        ? `${binaryName}.${target.platformArchABI}.wasm`
+        : `${binaryName}.${target.platformArchABI}.node`
     const scopedPackageJson = {
       name: `${packageName}-${target.platformArchABI}`,
       version: packageJson.version,
-      os: [target.platform],
       cpu: target.arch !== 'universal' ? [target.arch] : undefined,
       main: binaryFileName,
       files: [binaryFileName],
@@ -74,9 +83,48 @@ export async function createNpmDirs(userOptions: CreateNpmDirsOptions) {
         'bugs',
       ),
     }
+    if (target.arch !== 'wasm32') {
+      // @ts-expect-error
+      scopedPackageJson.os = [target.platform]
+    } else {
+      const entry = `${binaryName}.wasi.cjs`
+      scopedPackageJson.main = entry
+      // @ts-expect-error
+      scopedPackageJson.browser = `${binaryName}.wasi-browser.js`
+      scopedPackageJson.files.push(
+        entry,
+        // @ts-expect-error
+        scopedPackageJson.browser,
+        `wasi-worker.mjs`,
+        `wasi-worker-browser.mjs`,
+      )
+      let needRestrictNodeVersion = true
+      if (scopedPackageJson.engines?.node) {
+        try {
+          const { major } = parse(scopedPackageJson.engines.node) ?? {
+            major: 0,
+          }
+          if (major >= 14) {
+            needRestrictNodeVersion = false
+          }
+        } catch {
+          // ignore
+        }
+      }
+      if (needRestrictNodeVersion) {
+        scopedPackageJson.engines = {
+          node: '>=14.0.0',
+        }
+      }
+      const wasmRuntime = await fetch(
+        `https://registry.npmjs.org/@napi-rs/wasm-runtime`,
+      ).then((res) => res.json() as Promise<PackageMeta>)
+      // @ts-expect-error
+      scopedPackageJson.dependencies = {
+        '@napi-rs/wasm-runtime': `^${wasmRuntime['dist-tags'].latest}`,
+      }
+    }
 
-    // Only works with yarn 3.1+
-    // https://github.com/yarnpkg/berry/pull/3981
     if (target.abi === 'gnu') {
       // @ts-expect-error
       scopedPackageJson.libc = ['glibc']
@@ -88,12 +136,12 @@ export async function createNpmDirs(userOptions: CreateNpmDirsOptions) {
     const targetPackageJson = join(targetDir, 'package.json')
     await writeFileAsync(
       targetPackageJson,
-      JSON.stringify(scopedPackageJson, null, 2),
+      JSON.stringify(scopedPackageJson, null, 2) + '\n',
     )
     const targetReadme = join(targetDir, 'README.md')
     await writeFileAsync(targetReadme, readme(packageName, target))
 
-    debug.info(`${packageName}-${target.platformArchABI} created`)
+    debug.info(`${packageName} -${target.platformArchABI} created`)
   }
 }
 

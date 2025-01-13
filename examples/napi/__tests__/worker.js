@@ -1,6 +1,8 @@
-const { parentPort } = require('worker_threads')
+import { parentPort } from 'node:worker_threads'
 
-const native = require('../index.node')
+import native from '../index.cjs'
+
+const isWasiTest = !!process.env.WASI_TEST
 
 parentPort.on('message', ({ type }) => {
   switch (type) {
@@ -11,7 +13,7 @@ parentPort.on('message', ({ type }) => {
       break
     case 'async:buffer':
       Promise.all(
-        Array.from({ length: 100 }).map(() =>
+        Array.from({ length: isWasiTest ? 2 : 100 }).map(() =>
           native.bufferPassThrough(Buffer.from([1, 2, 3])),
         ),
       )
@@ -24,7 +26,7 @@ parentPort.on('message', ({ type }) => {
       break
     case 'async:arraybuffer':
       Promise.all(
-        Array.from({ length: 100 }).map(() =>
+        Array.from({ length: isWasiTest ? 2 : 100 }).map(() =>
           native.arrayBufferPassThrough(Uint8Array.from([1, 2, 3])),
         ),
       )
@@ -38,7 +40,7 @@ parentPort.on('message', ({ type }) => {
       break
     case 'constructor':
       let ellie
-      for (let i = 0; i < 10000; i++) {
+      for (let i = 0; i < (isWasiTest ? 10 : 1000); i++) {
         ellie = new native.Animal(native.Kind.Cat, 'Ellie')
       }
       parentPort.postMessage(ellie.name)

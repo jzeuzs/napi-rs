@@ -1,5 +1,3 @@
-use std::sync::atomic::AtomicUsize;
-
 use proc_macro2::{Ident, Span, TokenStream};
 
 use crate::BindgenResult;
@@ -8,17 +6,14 @@ mod r#const;
 mod r#enum;
 mod r#fn;
 mod r#struct;
+mod r#type;
+
+pub use r#struct::rm_raw_prefix;
 
 pub const PROPERTY_ATTRIBUTE_DEFAULT: i32 = 0;
 pub const PROPERTY_ATTRIBUTE_WRITABLE: i32 = 1 << 0;
 pub const PROPERTY_ATTRIBUTE_ENUMERABLE: i32 = 1 << 1;
 pub const PROPERTY_ATTRIBUTE_CONFIGURABLE: i32 = 1 << 2;
-
-static REGISTER_INDEX: AtomicUsize = AtomicUsize::new(0);
-
-thread_local! {
-  pub static REGISTER_IDENTS: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
-}
 
 pub trait TryToTokens {
   fn try_to_tokens(&self, tokens: &mut TokenStream) -> BindgenResult<()>;
@@ -32,16 +27,7 @@ pub trait TryToTokens {
 }
 
 fn get_intermediate_ident(name: &str) -> Ident {
-  let new_name = format!("__napi__{}", name);
-  Ident::new(&new_name, Span::call_site())
-}
-
-fn get_register_ident(name: &str) -> Ident {
-  let new_name = format!(
-    "__napi_register__{}_{}",
-    name,
-    REGISTER_INDEX.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-  );
+  let new_name = format!("_napi_internal_register_{}", name);
   Ident::new(&new_name, Span::call_site())
 }
 

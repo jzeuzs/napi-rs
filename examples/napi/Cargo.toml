@@ -10,27 +10,62 @@ crate-type = ["cdylib"]
 
 [features]
 snmalloc = ["snmalloc-rs"]
+dyn-symbols = ["napi/dyn-symbols"]
+error_try_builds = []
 
 [dependencies]
 chrono = "0.4"
 futures = "0.3"
-napi = { path = "../../crates/napi", default-features = false, features = [
-  "tokio_fs",
-  "napi8",
-  "tokio_rt",
-  "serde-json",
-  "async",
-  "experimental",
-  "latin1",
-  "chrono_date",
-  "deferred_trace",
-] }
+bytes = "1"
 napi-derive = { path = "../../crates/macro", features = ["type-def"] }
 napi-shared = { path = "../napi-shared" }
 serde = "1"
+serde_bytes = "0.11"
 serde_derive = "1"
 serde_json = "1"
-tokio = { version = "1.20.0", features = ["full"] }
+indexmap = "2"
+rustc-hash = "2"
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["io"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+napi = { path = "../../crates/napi", default-features = false, features = [
+  "napi9",
+  "serde-json",
+  "experimental",
+  "latin1",
+  "chrono_date",
+  "object_indexmap",
+  "tokio",
+  "async",
+  "tokio_rt",
+  "tokio_fs",
+  "tokio_macros",
+  "tokio_io_util",
+  "deferred_trace",
+  "node_version_detect",
+  "web_stream",
+] }
+tokio = { version = "1", features = ["rt", "time"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+napi = { path = "../../crates/napi", default-features = false, features = [
+  "napi9",
+  "serde-json",
+  "experimental",
+  "latin1",
+  "chrono_date",
+  "object_indexmap",
+  "tokio",
+  "async",
+  "tokio_rt",
+  "tokio_macros",
+  "tokio_sync",
+  "tokio_io_util",
+  "deferred_trace",
+  "web_stream",
+] }
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 
 [dependencies.snmalloc-rs]
 version = "0.3"

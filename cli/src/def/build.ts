@@ -6,7 +6,7 @@ export abstract class BaseBuildCommand extends Command {
   static paths = [['build']]
 
   static usage = Command.Usage({
-    description: 'Build the napi-rs project',
+    description: 'Build the NAPI-RS project',
   })
 
   target?: string = Option.String('--target,-t', {
@@ -21,6 +21,10 @@ export abstract class BaseBuildCommand extends Command {
 
   manifestPath?: string = Option.String('--manifest-path', {
     description: 'Path to `Cargo.toml`',
+  })
+
+  configPath?: string = Option.String('--config-path,-c', {
+    description: 'Path to `napi` config json file',
   })
 
   packageJsonPath?: string = Option.String('--package-json-path', {
@@ -47,9 +51,13 @@ export abstract class BaseBuildCommand extends Command {
       'Package name in generated js binding file. Only works with `--platform` flag',
   })
 
+  constEnum?: boolean = Option.Boolean('--const-enum', {
+    description: 'Whether generate const enum for typescript bindings',
+  })
+
   jsBinding?: string = Option.String('--js', {
     description:
-      'Path and filename of generated JS binding file. Only works with `--platform` flag. Relative to `--output_dir`.',
+      'Path and filename of generated JS binding file. Only works with `--platform` flag. Relative to `--output-dir`.',
   })
 
   noJsBinding?: boolean = Option.Boolean('--no-js', {
@@ -59,7 +67,7 @@ export abstract class BaseBuildCommand extends Command {
 
   dts?: string = Option.String('--dts', {
     description:
-      'Path and filename of generated type def file. Relative to `--output_dir`',
+      'Path and filename of generated type def file. Relative to `--output-dir`',
   })
 
   dtsHeader?: string = Option.String('--dts-header', {
@@ -70,6 +78,15 @@ export abstract class BaseBuildCommand extends Command {
   noDtsHeader?: boolean = Option.Boolean('--no-dts-header', {
     description:
       'Whether to disable the default file header for generated type def file. Only works when `typedef` feature enabled.',
+  })
+
+  dtsCache = Option.Boolean('--dts-cache', true, {
+    description: 'Whether to enable the dts cache, default to true',
+  })
+
+  esm?: boolean = Option.Boolean('--esm', {
+    description:
+      'Whether to emit an ESM JS binding file instead of CJS format. Only works with `--platform` flag.',
   })
 
   strip?: boolean = Option.Boolean('--strip,-s', {
@@ -106,9 +123,14 @@ export abstract class BaseBuildCommand extends Command {
       '[experimental] use [cross](https://github.com/cross-rs/cross) instead of `cargo`',
   })
 
+  useNapiCross?: boolean = Option.Boolean('--use-napi-cross', {
+    description:
+      '[experimental] use @napi-rs/cross-toolchain to cross-compile Linux arm/arm64/x64 gnu targets.',
+  })
+
   watch?: boolean = Option.Boolean('--watch,-w', {
     description:
-      'watch the crate changes and build continiously with `cargo-watch` crates',
+      'watch the crate changes and build continuously with `cargo-watch` crates',
   })
 
   features?: string[] = Option.Array('--features,-F', {
@@ -128,16 +150,20 @@ export abstract class BaseBuildCommand extends Command {
       target: this.target,
       cwd: this.cwd,
       manifestPath: this.manifestPath,
+      configPath: this.configPath,
       packageJsonPath: this.packageJsonPath,
       targetDir: this.targetDir,
       outputDir: this.outputDir,
       platform: this.platform,
       jsPackageName: this.jsPackageName,
+      constEnum: this.constEnum,
       jsBinding: this.jsBinding,
       noJsBinding: this.noJsBinding,
       dts: this.dts,
       dtsHeader: this.dtsHeader,
       noDtsHeader: this.noDtsHeader,
+      dtsCache: this.dtsCache,
+      esm: this.esm,
       strip: this.strip,
       release: this.release,
       verbose: this.verbose,
@@ -146,6 +172,7 @@ export abstract class BaseBuildCommand extends Command {
       profile: this.profile,
       crossCompile: this.crossCompile,
       useCross: this.useCross,
+      useNapiCross: this.useNapiCross,
       watch: this.watch,
       features: this.features,
       allFeatures: this.allFeatures,
@@ -155,7 +182,7 @@ export abstract class BaseBuildCommand extends Command {
 }
 
 /**
- * Build the napi-rs project
+ * Build the NAPI-RS project
  */
 export interface BuildOptions {
   /**
@@ -170,6 +197,10 @@ export interface BuildOptions {
    * Path to `Cargo.toml`
    */
   manifestPath?: string
+  /**
+   * Path to `napi` config json file
+   */
+  configPath?: string
   /**
    * Path to `package.json`
    */
@@ -191,7 +222,11 @@ export interface BuildOptions {
    */
   jsPackageName?: string
   /**
-   * Path and filename of generated JS binding file. Only works with `--platform` flag. Relative to `--output_dir`.
+   * Whether generate const enum for typescript bindings
+   */
+  constEnum?: boolean
+  /**
+   * Path and filename of generated JS binding file. Only works with `--platform` flag. Relative to `--output-dir`.
    */
   jsBinding?: string
   /**
@@ -199,7 +234,7 @@ export interface BuildOptions {
    */
   noJsBinding?: boolean
   /**
-   * Path and filename of generated type def file. Relative to `--output_dir`
+   * Path and filename of generated type def file. Relative to `--output-dir`
    */
   dts?: string
   /**
@@ -210,6 +245,16 @@ export interface BuildOptions {
    * Whether to disable the default file header for generated type def file. Only works when `typedef` feature enabled.
    */
   noDtsHeader?: boolean
+  /**
+   * Whether to enable the dts cache, default to true
+   *
+   * @default true
+   */
+  dtsCache?: boolean
+  /**
+   * Whether to emit an ESM JS binding file instead of CJS format. Only works with `--platform` flag.
+   */
+  esm?: boolean
   /**
    * Whether strip the library to achieve the minimum file size
    */
@@ -243,7 +288,11 @@ export interface BuildOptions {
    */
   useCross?: boolean
   /**
-   * watch the crate changes and build continiously with `cargo-watch` crates
+   * [experimental] use @napi-rs/cross-toolchain to cross-compile Linux arm/arm64/x64 gnu targets.
+   */
+  useNapiCross?: boolean
+  /**
+   * watch the crate changes and build continuously with `cargo-watch` crates
    */
   watch?: boolean
   /**
@@ -258,4 +307,11 @@ export interface BuildOptions {
    * Do not activate the `default` feature
    */
   noDefaultFeatures?: boolean
+}
+
+export function applyDefaultBuildOptions(options: BuildOptions) {
+  return {
+    dtsCache: true,
+    ...options,
+  }
 }

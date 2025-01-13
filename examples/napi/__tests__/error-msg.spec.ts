@@ -1,6 +1,6 @@
 import test from 'ava'
 
-import { receiveString } from '..'
+import { receiveString } from '../index.cjs'
 
 test('Function message', (t) => {
   // @ts-expect-error

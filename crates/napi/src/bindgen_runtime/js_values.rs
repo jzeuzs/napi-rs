@@ -24,8 +24,12 @@ mod number;
 mod object;
 #[cfg(all(feature = "tokio_rt", feature = "napi4"))]
 mod promise;
+mod promise_raw;
 #[cfg(feature = "serde-json")]
 mod serde;
+mod set;
+#[cfg(feature = "web_stream")]
+mod stream;
 mod string;
 mod symbol;
 mod task;
@@ -47,13 +51,13 @@ pub use nil::*;
 pub use object::*;
 #[cfg(all(feature = "tokio_rt", feature = "napi4"))]
 pub use promise::*;
+pub use promise_raw::*;
+#[cfg(feature = "web_stream")]
+pub use stream::*;
 pub use string::*;
 pub use symbol::*;
 pub use task::*;
 pub use value_ref::*;
-
-#[cfg(feature = "latin1")]
-pub use string::latin1_string::*;
 
 pub trait TypeName {
   fn type_name() -> &'static str;
@@ -79,6 +83,12 @@ impl TypeName for JsUnknown {
 }
 
 impl ValidateNapiValue for JsUnknown {}
+
+impl ToNapiValue for sys::napi_value {
+  unsafe fn to_napi_value(_env: sys::napi_env, val: Self) -> Result<sys::napi_value> {
+    Ok(val)
+  }
+}
 
 impl<T: NapiRaw> ToNapiValue for T {
   unsafe fn to_napi_value(_env: sys::napi_env, val: Self) -> Result<sys::napi_value> {
@@ -120,7 +130,7 @@ pub trait FromNapiMutRef {
   ) -> Result<&'static mut Self>;
 }
 
-pub trait ValidateNapiValue: FromNapiValue + TypeName {
+pub trait ValidateNapiValue: TypeName {
   /// # Safety
   ///
   /// this function called to validate whether napi value passed to rust is valid type

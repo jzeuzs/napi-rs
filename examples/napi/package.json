@@ -2,35 +2,63 @@
   "name": "@examples/napi",
   "private": true,
   "version": "0.0.0",
-  "main": "./index.node",
+  "type": "module",
+  "main": "./index.js",
   "types": "./index.d.ts",
   "scripts": {
-    "build": "napi-raw build --no-js",
-    "test": "ava"
+    "browser": "vite",
+    "build": "napi-raw build --platform --js index.cjs --dts index.d.cts",
+    "test": "cross-env TS_NODE_PROJECT=./tsconfig.json node --import @oxc-node/core/register ../../node_modules/ava/entrypoints/cli.mjs"
+  },
+  "napi": {
+    "binaryName": "example",
+    "wasm": {
+      "initialMemory": 16384,
+      "browser": {
+        "fs": true
+      }
+    },
+    "dtsHeader": "type MaybePromise<T> = T | Promise<T>",
+    "dtsHeaderFile": "./dts-header.d.ts",
+    "targets": [
+      "wasm32-wasip1-threads"
+    ]
   },
   "devDependencies": {
     "@napi-rs/cli": "workspace:*",
-    "@types/lodash": "^4.14.195",
-    "ava": "^5.3.1",
+    "@napi-rs/triples": "workspace:*",
+    "@napi-rs/wasm-runtime": "workspace:*",
+    "@oxc-node/core": "^0.0.17",
+    "@types/lodash": "^4.17.10",
+    "@vitest/browser": "^2.1.2",
+    "@vitest/ui": "^2.1.2",
+    "ava": "^6.1.3",
+    "buffer": "^6.0.3",
+    "cross-env": "7.0.3",
+    "electron": "^33.0.0",
     "lodash": "^4.17.21",
-    "sinon": "^15.2.0"
+    "playwright": "^1.48.0",
+    "rxjs": "^7.8.1",
+    "sinon": "^19.0.2",
+    "vite": "^6.0.0",
+    "vite-plugin-node-polyfills": "^0.22.0",
+    "vitest": "^2.1.2",
+    "web-streams-polyfill": "^4.1.0",
+    "webdriverio": "^9.2.1"
   },
   "ava": {
-    "extensions": [
-      "ts",
-      "tsx",
-      "js"
-    ],
-    "require": [
-      "ts-node/register/transpile-only"
-    ],
-    "files": [
-      "__tests__/**/*.spec.ts",
-      "__tests__/**/*.spec.js"
-    ],
-    "environmentVariables": {
-      "TS_NODE_PROJECT": "../tsconfig.json"
+    "extensions": {
+      "ts": "module",
+      "cts": "commonjs",
+      "cjs": true
     },
+    "files": [
+      "__tests__/**/*.spec.{ts,cts,js,cjs,mjs}"
+    ],
+    "cache": false,
     "timeout": "10m"
+  },
+  "dependencies": {
+    "@emnapi/core": "^1.3.1"
   }
 }

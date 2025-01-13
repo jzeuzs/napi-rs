@@ -1,4 +1,4 @@
-import { resolve } from 'path'
+import { resolve } from 'node:path'
 
 import { isNil, merge, omitBy, pick } from 'lodash-es'
 
@@ -29,6 +29,15 @@ export async function renameProject(userOptions: RenameOptions) {
       ),
     },
   )
+
+  if (options.configPath) {
+    const configPath = resolve(options.cwd, options.configPath)
+    const configContent = await readFileAsync(configPath, 'utf8')
+    const configData = JSON.parse(configContent)
+    configData.binaryName = options.binaryName
+    configData.packageName = options.packageName
+    await writeFileAsync(configPath, JSON.stringify(configData, null, 2))
+  }
 
   await writeFileAsync(
     packageJsonPath,

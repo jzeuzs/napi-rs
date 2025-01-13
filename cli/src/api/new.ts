@@ -1,4 +1,5 @@
-import path from 'path'
+import { execSync } from 'node:child_process'
+import path from 'node:path'
 
 import {
   applyDefaultNewOptions,
@@ -10,7 +11,11 @@ import {
   debugFactory,
   DEFAULT_TARGETS,
   mkdirAsync,
+  readdirAsync,
+  statAsync,
+  type SupportedTestFramework,
   writeFileAsync,
+  SupportedPackageManager,
 } from '../utils/index.js'
 import { napiEngineRequirement } from '../utils/version.js'
 
@@ -23,6 +28,7 @@ import {
   gitIgnore,
   npmIgnore,
 } from './templates/index.js'
+import { WasiTargetName } from './templates/ci-template.js'
 
 const debug = debugFactory('new')
 
@@ -35,6 +41,9 @@ type NewOptions = Required<RawNewOptions>
 
 function processOptions(options: RawNewOptions) {
   debug('Processing options...')
+  if (!options.path) {
+    throw new Error('Please provide the path as the argument')
+  }
   options.path = path.resolve(process.cwd(), options.path)
   debug(`Resolved target path to: ${options.path}`)
 
@@ -54,6 +63,20 @@ function processOptions(options: RawNewOptions) {
       throw new Error('At least one target must be enabled')
     }
   }
+  if (
+    options.targets.some((target) => target === 'wasm32-wasi-preview1-threads')
+  ) {
+    const out = execSync(`rustup target list`, {
+      encoding: 'utf8',
+    })
+    if (out.includes('wasm32-wasip1-threads')) {
+      options.targets.map((target) =>
+        target === 'wasm32-wasi-preview1-threads'
+          ? 'wasm32-wasip1-threads'
+          : target,
+      )
+    }
+  }
 
   return applyDefaultNewOptions(options) as NewOptions
 }
@@ -67,47 +90,75 @@ export async function newProject(userOptions: RawNewOptions) {
   debug('Targets to be enabled:')
   debug(options.targets)
 
-  const outputs = generateFiles(options)
+  const outputs = await generateFiles(options)
 
-  try {
-    debug(`Try to create target directory: ${options.path}`)
-    if (!options.dryRun) {
-      await mkdirAsync(options.path, { recursive: true })
-    }
-  } catch (e) {
-    throw new Error(`Failed to create target directory: ${options.path}`, {
-      cause: e,
-    })
-  }
+  await ensurePath(options.path, options.dryRun)
 
   await dumpOutputs(outputs, options.dryRun)
   debug(`Project created at: ${options.path}`)
 }
 
-function generateFiles(options: NewOptions): Output[] {
+async function ensurePath(path: string, dryRun = false) {
+  const stat = await statAsync(path, {}).catch(() => undefined)
+
+  // file descriptor exists
+  if (stat) {
+    if (stat.isFile()) {
+      throw new Error(
+        `Path ${path} for creating new napi-rs project already exists and it's not a directory.`,
+      )
+    } else if (stat.isDirectory()) {
+      const files = await readdirAsync(path)
+      if (files.length) {
+        throw new Error(
+          `Path ${path} for creating new napi-rs project already exists and it's not empty.`,
+        )
+      }
+    }
+  }
+
+  if (!dryRun) {
+    try {
+      debug(`Try to create target directory: ${path}`)
+      if (!dryRun) {
+        await mkdirAsync(path, { recursive: true })
+      }
+    } catch (e) {
+      throw new Error(`Failed to create target directory: ${path}`, {
+        cause: e,
+      })
+    }
+  }
+}
+
+async function generateFiles(options: NewOptions): Promise<Output[]> {
+  const packageJson = await generatePackageJson(options)
   return [
     generateCargoToml,
     generateLibRs,
     generateBuildRs,
-    generatePackageJson,
     generateGithubWorkflow,
     generateIgnoreFiles,
-  ].flatMap((generator) => {
-    const output = generator(options)
+  ]
+    .flatMap((generator) => {
+      const output = generator(options)
 
-    if (!output) {
-      return []
-    }
+      if (!output) {
+        return []
+      }
 
-    if (Array.isArray(output)) {
-      return output.map((o) => ({
-        ...o,
-        target: path.join(options.path, o.target),
-      }))
-    } else {
-      return [{ ...output, target: path.join(options.path, output.target) }]
-    }
-  })
+      if (Array.isArray(output)) {
+        return output.map((o) => ({
+          ...o,
+          target: path.join(options.path, o.target),
+        }))
+      } else {
+        return [{ ...output, target: path.join(options.path, output.target) }]
+      }
+    })
+    .concat([
+      { ...packageJson, target: path.join(options.path, packageJson.target) },
+    ])
 }
 
 function generateCargoToml(options: NewOptions): Output {
@@ -136,16 +187,17 @@ function generateBuildRs(_options: NewOptions): Output {
   }
 }
 
-function generatePackageJson(options: NewOptions): Output {
+async function generatePackageJson(options: NewOptions): Promise<Output> {
   return {
     target: './package.json',
-    content: createPackageJson({
+    content: await createPackageJson({
       name: options.name,
       binaryName: getBinaryName(options.name),
       targets: options.targets,
       license: options.license,
       engineRequirement: napiEngineRequirement(options.minNodeApiVersion),
       cliVersion: CLI_VERSION,
+      testFramework: options.testFramework as SupportedTestFramework,
     }),
   }
 }
@@ -158,8 +210,11 @@ function generateGithubWorkflow(options: NewOptions): Output | null {
   return {
     target: './.github/workflows/ci.yml',
     content: createGithubActionsCIYml(
-      getBinaryName(options.name),
       options.targets,
+      options.packageManager as SupportedPackageManager,
+      (options.targets.find((t) =>
+        t.includes('wasm32-wasi'),
+      ) as WasiTargetName) ?? 'wasm32-wasi-preview1-threads',
     ),
   }
 }

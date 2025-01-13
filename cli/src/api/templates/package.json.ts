@@ -1,12 +1,21 @@
-import { CommonPackageJsonFields } from '../../utils/config.js'
+import type {
+  CommonPackageJsonFields,
+  SupportedTestFramework,
+} from '../../utils/config.js'
+import { UNIVERSAL_TARGETS } from '../../utils/target.js'
 
-export const createPackageJson = ({
+export interface PackageMeta {
+  'dist-tags': { [index: string]: string }
+}
+
+export const createPackageJson = async ({
   name,
   binaryName,
   targets,
   license,
   engineRequirement,
   cliVersion,
+  testFramework,
 }: {
   name: string
   binaryName: string
@@ -14,10 +23,24 @@ export const createPackageJson = ({
   license: string
   engineRequirement: string
   cliVersion: string
+  testFramework: SupportedTestFramework
 }) => {
+  const hasWasmTarget = targets.some((t) => t.includes('wasm'))
+  const universalTargets = targets.filter(
+    (t) => t in UNIVERSAL_TARGETS,
+  ) as (keyof typeof UNIVERSAL_TARGETS)[]
+  const unifiedtargets = universalTargets.length
+    ? targets.filter(
+        (target) =>
+          !universalTargets.some((t) => {
+            // @ts-expect-error
+            return UNIVERSAL_TARGETS[t].includes(target)
+          }),
+      )
+    : targets
   const content: CommonPackageJsonFields = {
     name,
-    version: '1.0.0',
+    version: '0.0.0',
     license,
     engines: {
       node: engineRequirement,
@@ -25,14 +48,15 @@ export const createPackageJson = ({
     type: 'commonjs',
     main: 'index.js',
     types: 'index.d.ts',
+    browser: 'browser.js',
     module: undefined,
     exports: undefined,
     napi: {
       binaryName,
-      targets,
+      targets: unifiedtargets,
     },
     scripts: {
-      test: 'node -e "assert(require(\'.\').sum(1, 2) === 3)"',
+      test: testFramework,
       build: 'napi build --release --platform --strip',
       'build:debug': 'napi build',
       prepublishOnly: 'napi prepublish -t npm',
@@ -42,6 +66,24 @@ export const createPackageJson = ({
     devDependencies: {
       '@napi-rs/cli': `^${cliVersion}`,
     },
+  }
+
+  if (testFramework === 'ava') {
+    const avaMeta = await fetch(`https://registry.npmjs.org/ava`).then(
+      (res) => res.json() as Promise<PackageMeta>,
+    )
+    content.devDependencies!['ava'] = `^${avaMeta['dist-tags'].latest}`
+    content.ava = {
+      timeout: '1m',
+    }
+  }
+
+  if (hasWasmTarget) {
+    const wasmRuntime = await fetch(
+      `https://registry.npmjs.org/@napi-rs/wasm-runtime`,
+    ).then((res) => res.json() as Promise<PackageMeta>)
+    const latest = wasmRuntime['dist-tags'].latest
+    content.devDependencies!['@napi-rs/wasm-runtime'] = `^${latest}`
   }
 
   return JSON.stringify(content, null, 2)

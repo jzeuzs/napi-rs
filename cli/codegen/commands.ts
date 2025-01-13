@@ -11,12 +11,14 @@ export interface OptionSchema {
   description: string
   required?: boolean
   default?: any
-  short?: string
+  short?: string[]
+  alias?: string[]
   long?: string
 }
 
 export interface CommandSchema {
   name: string
+  alias?: string[]
   description: string
   args: ArgSchema[]
   options: OptionSchema[]
@@ -31,8 +33,8 @@ const NEW_OPTIONS: CommandSchema = {
     {
       name: 'path',
       type: 'string',
-      description: 'The path where the napi-rs project will be created.',
-      required: true,
+      description: 'The path where the NAPI-RS project will be created.',
+      required: false,
     },
   ],
   options: [
@@ -41,35 +43,34 @@ const NEW_OPTIONS: CommandSchema = {
       type: 'string',
       description:
         'The name of the project, default to the name of the directory if not provided',
-      short: 'n',
+      short: ['n'],
     },
     {
       name: 'minNodeApiVersion',
       type: 'number',
       description: 'The minimum Node-API version to support',
       default: 4,
-      short: 'v',
+      short: ['v'],
       long: 'min-node-api',
     },
-    // will support it later
-    // {
-    //   name: 'packageManager',
-    //   type: 'string',
-    //   description: 'The package manager to use',
-    //   default: "'yarn'",
-    // },
+    {
+      name: 'packageManager',
+      type: 'string',
+      description: 'The package manager to use. Only support yarn 4.x for now.',
+      default: "'yarn'",
+    },
     {
       name: 'license',
       type: 'string',
       description: 'License for open-sourced project',
-      short: 'l',
+      short: ['l'],
       default: "'MIT'",
     },
     {
       name: 'targets',
       type: 'string[]',
       description: 'All targets the crate will be compiled for.',
-      short: 't',
+      short: ['t'],
       default: '[]',
     },
     {
@@ -98,6 +99,13 @@ const NEW_OPTIONS: CommandSchema = {
       default: true,
     },
     {
+      name: 'testFramework',
+      type: 'string',
+      description:
+        'The JavaScript test framework to use, only support `ava` for now',
+      default: "'ava'",
+    },
+    {
       name: 'dryRun',
       type: 'boolean',
       description: 'Whether to run the command in dry-run mode',
@@ -108,7 +116,7 @@ const NEW_OPTIONS: CommandSchema = {
 
 const BUILD_OPTIONS: CommandSchema = {
   name: 'build',
-  description: 'Build the napi-rs project',
+  description: 'Build the NAPI-RS project',
   args: [],
   options: [
     {
@@ -116,7 +124,7 @@ const BUILD_OPTIONS: CommandSchema = {
       type: 'string',
       description:
         'Build for the target triple, bypassed to `cargo build --target`',
-      short: 't',
+      short: ['t'],
     },
     {
       name: 'cwd',
@@ -128,6 +136,12 @@ const BUILD_OPTIONS: CommandSchema = {
       name: 'manifestPath',
       type: 'string',
       description: 'Path to `Cargo.toml`',
+    },
+    {
+      name: 'configPath',
+      type: 'string',
+      description: 'Path to `napi` config json file',
+      short: ['c'],
     },
     {
       name: 'packageJsonPath',
@@ -145,7 +159,7 @@ const BUILD_OPTIONS: CommandSchema = {
       type: 'string',
       description:
         'Path to where all the built files would be put. Default to the crate folder',
-      short: 'o',
+      short: ['o'],
     },
     {
       name: 'platform',
@@ -160,10 +174,15 @@ const BUILD_OPTIONS: CommandSchema = {
         'Package name in generated js binding file. Only works with `--platform` flag',
     },
     {
+      name: 'constEnum',
+      type: 'boolean',
+      description: 'Whether generate const enum for typescript bindings',
+    },
+    {
       name: 'jsBinding',
       type: 'string',
       description:
-        'Path and filename of generated JS binding file. Only works with `--platform` flag. Relative to `--output_dir`.',
+        'Path and filename of generated JS binding file. Only works with `--platform` flag. Relative to `--output-dir`.',
       long: 'js',
     },
     {
@@ -177,7 +196,7 @@ const BUILD_OPTIONS: CommandSchema = {
       name: 'dts',
       type: 'string',
       description:
-        'Path and filename of generated type def file. Relative to `--output_dir`',
+        'Path and filename of generated type def file. Relative to `--output-dir`',
     },
     {
       name: 'dtsHeader',
@@ -192,22 +211,34 @@ const BUILD_OPTIONS: CommandSchema = {
         'Whether to disable the default file header for generated type def file. Only works when `typedef` feature enabled.',
     },
     {
+      name: 'dtsCache',
+      type: 'boolean',
+      description: 'Whether to enable the dts cache, default to true',
+      default: true,
+    },
+    {
+      name: 'esm',
+      type: 'boolean',
+      description:
+        'Whether to emit an ESM JS binding file instead of CJS format. Only works with `--platform` flag.',
+    },
+    {
       name: 'strip',
       type: 'boolean',
       description: 'Whether strip the library to achieve the minimum file size',
-      short: 's',
+      short: ['s'],
     },
     {
       name: 'release',
       type: 'boolean',
       description: 'Build in release mode',
-      short: 'r',
+      short: ['r'],
     },
     {
       name: 'verbose',
       type: 'boolean',
       description: 'Verbosely log build command trace',
-      short: 'v',
+      short: ['v'],
     },
     {
       name: 'bin',
@@ -218,7 +249,7 @@ const BUILD_OPTIONS: CommandSchema = {
       name: 'package',
       type: 'string',
       description: 'Build the specified library or the one at cwd',
-      short: 'p',
+      short: ['p'],
     },
     {
       name: 'profile',
@@ -230,7 +261,7 @@ const BUILD_OPTIONS: CommandSchema = {
       type: 'boolean',
       description:
         '[experimental] cross-compile for the specified target with `cargo-xwin` on windows and `cargo-zigbuild` on other platform',
-      short: 'x',
+      short: ['x'],
     },
     {
       name: 'useCross',
@@ -239,17 +270,23 @@ const BUILD_OPTIONS: CommandSchema = {
         '[experimental] use [cross](https://github.com/cross-rs/cross) instead of `cargo`',
     },
     {
+      name: 'useNapiCross',
+      type: 'boolean',
+      description:
+        '[experimental] use @napi-rs/cross-toolchain to cross-compile Linux arm/arm64/x64 gnu targets.',
+    },
+    {
       name: 'watch',
       type: 'boolean',
       description:
-        'watch the crate changes and build continiously with `cargo-watch` crates',
-      short: 'w',
+        'watch the crate changes and build continuously with `cargo-watch` crates',
+      short: ['w'],
     },
     {
       name: 'features',
       type: 'string[]',
       description: 'Space-separated list of features to activate',
-      short: 'F',
+      short: ['F'],
     },
     {
       name: 'allFeatures',
@@ -278,6 +315,12 @@ const ARTIFACTS_OPTIONS: CommandSchema = {
       default: 'process.cwd()',
     },
     {
+      name: 'configPath',
+      type: 'string',
+      description: 'Path to `napi` config json file',
+      short: ['c'],
+    },
+    {
       name: 'packageJsonPath',
       type: 'string',
       description: 'Path to `package.json`',
@@ -288,14 +331,20 @@ const ARTIFACTS_OPTIONS: CommandSchema = {
       type: 'string',
       description:
         'Path to the folder where all built `.node` files put, same as `--output-dir` of build command',
-      short: 'o',
-      default: "'./'",
+      short: ['o', 'd'],
+      default: "'./artifacts'",
     },
     {
       name: 'npmDir',
       type: 'string',
       description: 'Path to the folder where the npm packages put',
       default: "'npm'",
+    },
+    {
+      name: 'buildOutputDir',
+      type: 'string',
+      description:
+        'Path to the build output dir, only needed when targets contains `wasm32-wasi-*`',
     },
   ],
 }
@@ -311,6 +360,12 @@ const CREATE_NPM_DIRS_OPTIONS: CommandSchema = {
       description:
         'The working directory of where napi command will be executed in, all other paths options are relative to this path',
       default: 'process.cwd()',
+    },
+    {
+      name: 'configPath',
+      type: 'string',
+      description: 'Path to `napi` config json file',
+      short: ['c'],
     },
     {
       name: 'packageJsonPath',
@@ -335,7 +390,7 @@ const CREATE_NPM_DIRS_OPTIONS: CommandSchema = {
 
 const RENAME_OPTIONS: CommandSchema = {
   name: 'rename',
-  description: 'Rename the napi-rs project',
+  description: 'Rename the NAPI-RS project',
   args: [],
   options: [
     {
@@ -344,6 +399,12 @@ const RENAME_OPTIONS: CommandSchema = {
       description:
         'The working directory of where napi command will be executed in, all other paths options are relative to this path',
       default: 'process.cwd()',
+    },
+    {
+      name: 'configPath',
+      type: 'string',
+      description: 'Path to `napi` config json file',
+      short: ['c'],
     },
     {
       name: 'packageJsonPath',
@@ -361,13 +422,13 @@ const RENAME_OPTIONS: CommandSchema = {
       name: 'name',
       type: 'string',
       description: 'The new name of the project',
-      short: 'n',
+      short: ['n'],
     },
     {
       name: 'binaryName',
       type: 'string',
       description: 'The new binary name *.node files',
-      short: 'b',
+      short: ['b'],
     },
     {
       name: 'packageName',
@@ -406,6 +467,12 @@ const UNIVERSALIZE_OPTIONS: CommandSchema = {
       default: 'process.cwd()',
     },
     {
+      name: 'configPath',
+      type: 'string',
+      description: 'Path to `napi` config json file',
+      short: ['c'],
+    },
+    {
       name: 'packageJsonPath',
       type: 'string',
       description: 'Path to `package.json`',
@@ -416,7 +483,7 @@ const UNIVERSALIZE_OPTIONS: CommandSchema = {
       type: 'string',
       description:
         'Path to the folder where all built `.node` files put, same as `--output-dir` of build command',
-      short: 'o',
+      short: ['o'],
       default: "'./'",
     },
   ],
@@ -433,6 +500,12 @@ const VERSION_OPTIONS: CommandSchema = {
       description:
         'The working directory of where napi command will be executed in, all other paths options are relative to this path',
       default: 'process.cwd()',
+    },
+    {
+      name: 'configPath',
+      type: 'string',
+      description: 'Path to `napi` config json file',
+      short: ['c'],
     },
     {
       name: 'packageJsonPath',
@@ -453,6 +526,8 @@ const PRE_PUBLISH_OPTIONS: CommandSchema = {
   name: 'prePublish',
   description: 'Update package.json and copy addons into per platform packages',
   args: [],
+  // compatible with old command name
+  alias: ['prepublish'],
   options: [
     {
       name: 'cwd',
@@ -460,6 +535,12 @@ const PRE_PUBLISH_OPTIONS: CommandSchema = {
       description:
         'The working directory of where napi command will be executed in, all other paths options are relative to this path',
       default: 'process.cwd()',
+    },
+    {
+      name: 'configPath',
+      type: 'string',
+      description: 'Path to `napi` config json file',
+      short: ['c'],
     },
     {
       name: 'packageJsonPath',
@@ -472,12 +553,15 @@ const PRE_PUBLISH_OPTIONS: CommandSchema = {
       type: 'string',
       description: 'Path to the folder where the npm packages put',
       default: "'npm'",
+      short: ['p'],
     },
     {
       name: 'tagStyle',
       type: "'npm' | 'lerna'",
       description: 'git tag style, `npm` or `lerna`',
       default: "'lerna'",
+      alias: ['tagstyle'],
+      short: ['t'],
     },
     {
       name: 'ghRelease',

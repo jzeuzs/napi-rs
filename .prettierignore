@@ -5,3 +5,6 @@ triples/index.js
 examples/napi/index.d.ts
 .yarn
 yarn.lock
+examples/napi/wasi-worker.mjs
+examples/napi/example.wasi.cjs
+examples/napi/example.wasi-browser.js
